@@ -36,7 +36,13 @@ async function startServer(): Promise<ChildProcess> {
     process.execPath,
     ["--import", "tsx", new URL("../src/index.ts", import.meta.url).pathname],
     {
-      env: { ...process.env, PORT: String(PORT), HOST: "127.0.0.1" },
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        HOST: "127.0.0.1",
+        // Dead port: any tool call fails fast with a message naming this base URL.
+        DREAMFACTORY_URL: "http://127.0.0.1:2/api/v2",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -83,3 +89,62 @@ test("MCP server exposes all 17 control-plane tools", async (t) => {
     await client.close();
   }
 });
+
+test("direct mode: untrusted X-Mcp-Base-Url is ignored (no MCP_INTERNAL_KEY)", async (t) => {
+  const child = await startServer();
+  t.after(() => {
+    child.kill("SIGTERM");
+  });
+
+  const attacker = "http://127.0.0.1:1/api/v2";
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    "x-dreamfactory-session-token": "sess-abc",
+    "x-mcp-base-url": attacker,
+  };
+  const init = await fetch(`http://127.0.0.1:${PORT}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+    }),
+  });
+  assert.equal(init.status, 200);
+  const sid = init.headers.get("mcp-session-id");
+  assert.ok(sid);
+  await init.text();
+  headers["mcp-session-id"] = sid;
+  await fetch(`http://127.0.0.1:${PORT}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+  }).then((r) => r.text());
+
+  const call = await fetch(`http://127.0.0.1:${PORT}/mcp`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "list_services", arguments: {} },
+    }),
+  });
+  const text = await call.text();
+  const msg = text
+    .split("\n")
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => JSON.parse(l.slice(5).trim()))
+    .concat(text.trim().startsWith("{") ? [JSON.parse(text)] : [])
+    .find((m) => m.id === 2) as { result: { isError?: boolean; content: { text: string }[] } };
+  assert.ok(msg, `no response: ${text}`);
+  assert.equal(msg.result.isError, true, "call must fail (dead default port), not succeed elsewhere");
+  const errText = msg.result.content[0].text;
+  assert.match(errText, /127\.0\.0\.1:2\/api\/v2/, `must use DREAMFACTORY_URL, got: ${errText}`);
+  assert.doesNotMatch(errText, /127\.0\.0\.1:1\//, "attacker base URL must never be contacted");
+});
+

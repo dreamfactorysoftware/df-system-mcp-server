@@ -32,15 +32,17 @@ Default port: **3700** (override with `PORT`).
 
 ### Proxy contract (what `df-mcp-server` sends)
 
-Request headers (all read per request, re-bound to the MCP session on every call):
+Request headers (read per request; the session token / API key / trace id are re-bound on
+every call, `X-Mcp-Base-Url` is bound at `initialize` only):
 
 | Header | Meaning |
 | ------ | ------- |
 | `X-DreamFactory-Session-Token` | DF session token of the OAuth'd user. **Required** for tool calls. |
 | `X-DreamFactory-API-Key` | Optional DF API key (`app_id` on the service). Forwarded verbatim. |
-| `X-Mcp-Base-Url` | DF base URL ending in `/api/v2`. Overrides `DREAMFACTORY_URL` for that session. |
+| `X-Mcp-Base-Url` | DF base URL ending in `/api/v2`. Overrides `DREAMFACTORY_URL` for that session. **Trusted only** from callers that passed the `MCP_INTERNAL_KEY` gate, or whose origin is on the allowlist (`DREAMFACTORY_URL` origin + `MCP_ALLOWED_BASE_URLS`); otherwise ignored with a warning. Bound at `initialize`, never rebound. |
 | `X-DreamFactory-Trace-Id` | Optional trace id, forwarded back on every DF call. |
-| `X-Mcp-Internal-Key` | Required when `MCP_INTERNAL_KEY` is set (else `403 {code:-32001}`). |
+| `X-Mcp-Internal-Key` | Required when `MCP_INTERNAL_KEY` is set (else `403 {code:-32001}`). Compared in constant time. |
+| `X-Mcp-One-Shot` | `1` on `initialize` marks the session single-use: it is closed as soon as the first non-lifecycle JSON-RPC request (e.g. `tools/call`) has been answered. Intended for the PHP `rpcStateless()` bridge (`POST /api/v2/{svc}/rpc`), which never sends `DELETE`. |
 | `X-Mcp-Config` | `GET`/`DELETE` only: JSON service config (POST carries it in the envelope). |
 | `Mcp-Session-Id`, `Last-Event-ID`, `Content-Type`, `Accept` | Standard Streamable HTTP headers, passed through. |
 
@@ -63,6 +65,14 @@ Responses are whatever the MCP SDK's Streamable HTTP transport produces (`applic
 or `text/event-stream`), plus `Mcp-Session-Id` on `initialize`. The PHP client streams SSE
 through untouched.
 
+Session errors (all `POST`/`GET`/`DELETE` routes):
+
+| Status | Meaning |
+| ------ | ------- |
+| `400 {code:-32000}` | No `Mcp-Session-Id` and the body is not an `initialize` request (POST), or the header is missing (GET/DELETE). |
+| `404 {code:-32001, message:"Session not found"}` | `Mcp-Session-Id` is unknown — evicted after `SESSION_TTL_SECONDS`, closed by `DELETE`/one-shot, or the daemon restarted. Clients must re-`initialize` (this is the Streamable HTTP spec behaviour and what the MCP SDK client keys on). |
+| `403 {code:-32001}` | `MCP_INTERNAL_KEY` set and header missing/wrong. |
+
 ### Direct mode (df-ai-assistant)
 
 `POST /mcp` with `X-DreamFactory-Session-Token` (or `Authorization: Bearer <token>`) and,
@@ -84,7 +94,23 @@ of that token — non-admin tokens cannot administer the instance. Tokens and ke
 | `HOST`                | `0.0.0.0`           | HTTP listen host. |
 | `DREAMFACTORY_URL`    | `http://web/api/v2` | Default DreamFactory base URL (no trailing slash required). Overridden per session by `X-Mcp-Base-Url`. |
 | `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
-| `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). |
+| `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). Requests with an evicted id get `404 Session not found`. |
+| `MCP_ALLOWED_BASE_URLS` | *(unset)*         | Comma-separated extra origins that untrusted callers may name in `X-Mcp-Base-Url` (the `DREAMFACTORY_URL` origin is always allowed). Not needed when `MCP_INTERNAL_KEY` is set. |
+
+### Trust boundary
+
+Anything that can reach this port can send a DreamFactory session token and have the daemon
+act with it — that is by design (the token is the authorisation). What the daemon must **not**
+allow is a caller redirecting where that token is sent. Therefore:
+
+- `X-Mcp-Base-Url` is honoured only from callers that presented the correct `X-Mcp-Internal-Key`
+  (the DreamFactory PHP proxy) or whose origin is on the allowlist; everyone else gets
+  `DREAMFACTORY_URL`. Set `MCP_INTERNAL_KEY` in production.
+- The base URL is fixed at `initialize`; knowing a live `Mcp-Session-Id` does not let a caller
+  rebind that session's base URL.
+- `call_system_api` validates the **resolved** URL: `system/../db/_table/x`, `%2e%2e`,
+  backslashes, absolute URLs and embedded `?`/`#` are all rejected before any request is made.
+- Bind the daemon to a private interface / Docker network; it has no user-facing auth of its own.
 
 ### DreamFactory side
 

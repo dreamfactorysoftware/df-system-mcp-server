@@ -30,6 +30,31 @@ OAuth 2.1 and the `/api/v2/{service}/rpc` bridge.
   `npm test` now runs every `tests/*.test.ts`.
 - Ops: `scripts/start-daemon.sh`, `docker-compose.example.yml`,
   `.github/workflows/ci.yml` (Node 20 + 22).
+- `X-Mcp-One-Shot: 1` on `initialize` closes the session after its first
+  answered request, so `rpcStateless()`-style callers that never `DELETE`
+  do not pin a McpServer for `SESSION_TTL_SECONDS`.
+- `MCP_ALLOWED_BASE_URLS` env (extra origins untrusted callers may use in
+  `X-Mcp-Base-Url`).
+- `tests/path-guard.test.ts`, `tests/trust.test.ts` (unit), plus proxy-contract
+  cases for dot-segment bypasses, 404 on unknown session, base-URL hijack and
+  one-shot teardown; smoke case for direct-mode base-URL trust.
+
+### Security
+- `call_system_api` path guard now validates the resolved URL
+  (`src/path-guard.ts`): `system/../db/_table/x`, `/system/%2e%2e/...`,
+  backslashes, absolute URLs and embedded `?`/`#` are rejected. Previously a
+  dot-segment path passed the `startsWith('system/')` check and WHATWG URL
+  normalisation in `fetch` sent it to the data plane.
+- `X-Mcp-Base-Url` is trusted only from internal-key-verified callers or
+  allowlisted origins, and is bound at `initialize` only (never rebound on a
+  later request carrying the same `Mcp-Session-Id`).
+- Internal-key comparison uses `crypto.timingSafeEqual`.
+
+### Fixed
+- Unknown / evicted `Mcp-Session-Id` now returns
+  `404 {code:-32001, message:"Session not found"}` on POST/GET/DELETE (per the
+  Streamable HTTP spec and the SDK transport) instead of a misleading 400, so
+  SDK clients re-initialize instead of retrying a dead id.
 
 ### Changed
 - `@modelcontextprotocol/sdk` pinned to `~1.18.2`: 1.23+ (zod v3/v4 compat

@@ -119,7 +119,12 @@ function parseRpcResponse(text: string, contentType: string | null): unknown[] {
 async function proxyPost(
   baseUrl: string,
   payload: unknown,
-  opts: { config?: Record<string, unknown>; sessionId?: string; internalKey?: string } = {},
+  opts: {
+    config?: Record<string, unknown>;
+    sessionId?: string;
+    internalKey?: string;
+    extraHeaders?: Record<string, string>;
+  } = {},
 ): Promise<{ status: number; sessionId: string | null; messages: unknown[] }> {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -131,6 +136,7 @@ async function proxyPost(
   };
   if (opts.internalKey !== undefined) headers["x-mcp-internal-key"] = opts.internalKey;
   if (opts.sessionId) headers["mcp-session-id"] = opts.sessionId;
+  Object.assign(headers, opts.extraHeaders ?? {});
   const res = await fetch(`http://127.0.0.1:${PORT}/mcp/sysmcp`, {
     method: "POST",
     headers,
@@ -171,8 +177,9 @@ function rpcResult(messages: unknown[], id: number): Record<string, unknown> {
 async function openSession(
   baseUrl: string,
   config: Record<string, unknown> = {},
+  extraHeaders: Record<string, string> = {},
 ): Promise<string> {
-  const init = await proxyPost(baseUrl, initialize, { config, internalKey: INTERNAL_KEY });
+  const init = await proxyPost(baseUrl, initialize, { config, internalKey: INTERNAL_KEY, extraHeaders });
   assert.equal(init.status, 200, "initialize via envelope must succeed");
   const sid = init.sessionId;
   assert.ok(sid, "Mcp-Session-Id must be returned on initialize");
@@ -182,7 +189,7 @@ async function openSession(
   const notified = await proxyPost(
     baseUrl,
     { jsonrpc: "2.0", method: "notifications/initialized" },
-    { config, sessionId: sid, internalKey: INTERNAL_KEY },
+    { config, sessionId: sid, internalKey: INTERNAL_KEY, extraHeaders },
   );
   assert.equal(notified.status, 202, "notification must be accepted with 202");
   return sid;
@@ -313,22 +320,124 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.ok(msg.error !== undefined || msg.result?.isError === true, "disabled tool must not execute");
   });
 
-  await t.test("call_system_api rejects data-plane paths", async () => {
+  await t.test("call_system_api rejects data-plane paths, including dot-segment bypasses", async () => {
     const sid = await openSession(baseUrl);
+    const bad = [
+      "db/_table/x",
+      "system/../db/_table/x",
+      "/system/%2e%2e/db/_table/x",
+      "system/..%2fdb/_table/x",
+      "system\\..\\db\\_table\\x",
+      "http://127.0.0.1:1/api/v2/system/service",
+    ];
+    let id = 100;
+    for (const path of bad) {
+      const seenBefore = mock.seen.length;
+      const called = await proxyPost(
+        baseUrl,
+        {
+          jsonrpc: "2.0",
+          id: ++id,
+          method: "tools/call",
+          params: { name: "call_system_api", arguments: { method: "GET", path } },
+        },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(called.messages, id);
+      assert.equal(result.isError, true, `${path} must be rejected`);
+      assert.match((result.content as { text: string }[])[0].text, /path rejected/);
+      assert.equal(mock.seen.length, seenBefore, `${path}: rejected path must never reach DreamFactory`);
+    }
+
+    // And a legitimate escape-hatch call still goes through to system/*.
     const seenBefore = mock.seen.length;
-    const called = await proxyPost(
+    const ok = await proxyPost(
       baseUrl,
       {
         jsonrpc: "2.0",
-        id: 6,
+        id: 7,
         method: "tools/call",
-        params: { name: "call_system_api", arguments: { method: "GET", path: "db/_table/x" } },
+        params: { name: "call_system_api", arguments: { method: "GET", path: "/system/service", query: { limit: 1 } } },
       },
       { sessionId: sid, internalKey: INTERNAL_KEY },
     );
-    const result = rpcResult(called.messages, 6);
-    assert.equal(result.isError, true);
-    assert.match((result.content as { text: string }[])[0].text, /path rejected/);
-    assert.equal(mock.seen.length, seenBefore, "rejected path must never reach DreamFactory");
+    const okResult = rpcResult(ok.messages, 7);
+    assert.notEqual(okResult.isError, true, JSON.stringify(okResult));
+    assert.equal(mock.seen.length, seenBefore + 1);
+    assert.equal(mock.seen[mock.seen.length - 1].url, "/api/v2/system/service?limit=1");
+  });
+
+  await t.test("unknown / evicted Mcp-Session-Id returns 404 Session not found", async () => {
+    const dead = "00000000-0000-4000-8000-000000000000";
+    const post = await proxyPost(
+      baseUrl,
+      { jsonrpc: "2.0", id: 8, method: "tools/list", params: {} },
+      { sessionId: dead, internalKey: INTERNAL_KEY },
+    );
+    assert.equal(post.status, 404);
+    assert.equal((post.messages[0] as { error: { code: number } }).error.code, -32001);
+
+    for (const method of ["GET", "DELETE"]) {
+      const res = await fetch(`http://127.0.0.1:${PORT}/mcp/sysmcp`, {
+        method,
+        headers: { "mcp-session-id": dead, "x-mcp-internal-key": INTERNAL_KEY, accept: "text/event-stream" },
+      });
+      assert.equal(res.status, 404, `${method} with dead session id`);
+      const body = (await res.json()) as { error: { code: number; message: string } };
+      assert.equal(body.error.message, "Session not found");
+    }
+
+    // Genuinely missing header + non-initialize body stays a 400.
+    const missing = await proxyPost(
+      baseUrl,
+      { jsonrpc: "2.0", id: 9, method: "tools/list", params: {} },
+      { internalKey: INTERNAL_KEY },
+    );
+    assert.equal(missing.status, 400);
+  });
+
+  await t.test("X-Mcp-Base-Url is bound at initialize and cannot be hijacked mid-session", async () => {
+    const sid = await openSession(baseUrl);
+    const seenBefore = mock.seen.length;
+    // Same session id, attacker-controlled base URL (a dead port). The call
+    // must still go to the mock bound at initialize.
+    const called = await proxyPost("http://127.0.0.1:1/api/v2", {
+      jsonrpc: "2.0",
+      id: 10,
+      method: "tools/call",
+      params: { name: "list_services", arguments: {} },
+    }, { sessionId: sid, internalKey: INTERNAL_KEY });
+    const result = rpcResult(called.messages, 10);
+    assert.notEqual(result.isError, true, JSON.stringify(result));
+    assert.equal(mock.seen.length, seenBefore + 1, "call must reach the originally bound DreamFactory");
+  });
+
+  await t.test("X-Mcp-One-Shot: 1 closes the session after the first tool response", async () => {
+    const before = ((await fetch(`http://127.0.0.1:${PORT}/health`).then((r) => r.json())) as { active_sessions: number })
+      .active_sessions;
+    const sid = await openSession(baseUrl, {}, { "x-mcp-one-shot": "1" });
+    const mid = ((await fetch(`http://127.0.0.1:${PORT}/health`).then((r) => r.json())) as { active_sessions: number })
+      .active_sessions;
+    assert.equal(mid, before + 1, "handshake keeps the one-shot session alive");
+
+    const listed = await proxyPost(
+      baseUrl,
+      { jsonrpc: "2.0", id: 11, method: "tools/list", params: {} },
+      { sessionId: sid, internalKey: INTERNAL_KEY },
+    );
+    assert.equal(listed.status, 200);
+    assert.equal((rpcResult(listed.messages, 11).tools as unknown[]).length, TOOL_NAMES.length);
+
+    await delay(100);
+    const after = ((await fetch(`http://127.0.0.1:${PORT}/health`).then((r) => r.json())) as { active_sessions: number })
+      .active_sessions;
+    assert.equal(after, before, "one-shot session must be torn down after its first response");
+
+    const again = await proxyPost(
+      baseUrl,
+      { jsonrpc: "2.0", id: 12, method: "tools/list", params: {} },
+      { sessionId: sid, internalKey: INTERNAL_KEY },
+    );
+    assert.equal(again.status, 404, "torn-down session id is gone");
   });
 });

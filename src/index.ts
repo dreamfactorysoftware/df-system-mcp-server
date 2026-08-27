@@ -8,6 +8,7 @@ import { buildMcpServer, SERVER_NAME, SERVER_VERSION } from "./server";
 import { TOOL_COUNT } from "./tools";
 import { clearAuthForSession, getBaseUrl, setAuthForSession } from "./dreamfactory";
 import type { AuthContext, McpServiceConfig } from "./types";
+import { acceptBaseUrl, buildAllowedOrigins, safeEqual } from "./trust";
 
 const PORT = parseInt(process.env.PORT || "3700", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -19,6 +20,11 @@ const SESSION_TTL_SECONDS = Math.max(
   parseInt(process.env.SESSION_TTL_SECONDS || "1800", 10) || 0,
 );
 const SWEEP_INTERVAL_MS = 60_000;
+/**
+ * Origins that untrusted (non-internal-key) callers may name in X-Mcp-Base-Url.
+ * Always includes the DREAMFACTORY_URL origin; extend with MCP_ALLOWED_BASE_URLS.
+ */
+const ALLOWED_BASE_ORIGINS = buildAllowedOrigins(getBaseUrl(), process.env.MCP_ALLOWED_BASE_URLS);
 
 /** Pull the DreamFactory session token from a request. */
 function extractSessionToken(req: Request): string | undefined {
@@ -42,22 +48,48 @@ function nonEmpty(v: string | undefined): string | undefined {
  * and trace id.
  */
 function extractAuthContext(req: Request): AuthContext {
+  const presented = nonEmpty(req.header("x-mcp-base-url"));
+  const baseUrl = acceptBaseUrl(presented, {
+    internalKeyVerified: internalKeyVerified(req),
+    allowedOrigins: ALLOWED_BASE_ORIGINS,
+  });
+  if (presented && !baseUrl) {
+    console.warn(
+      "[df-system-mcp] ignoring X-Mcp-Base-Url from untrusted caller (set MCP_INTERNAL_KEY or MCP_ALLOWED_BASE_URLS)",
+    );
+  }
   return {
     sessionToken: extractSessionToken(req),
     apiKey: nonEmpty(req.header("x-dreamfactory-api-key")),
-    baseUrl: nonEmpty(req.header("x-mcp-base-url")),
+    baseUrl,
     traceId: nonEmpty(req.header("x-dreamfactory-trace-id")),
   };
 }
 
-/** Merge a fresh context over an existing one, keeping old values for missing headers. */
+/**
+ * Merge a fresh context over an existing one, keeping old values for missing
+ * headers. `baseUrl` is bound at initialize only and never overwritten — a
+ * caller who merely knows a live Mcp-Session-Id must not be able to redirect
+ * that session's DreamFactory traffic (token exfiltration).
+ */
 function mergeAuth(prev: AuthContext | undefined, next: AuthContext): AuthContext {
   return {
     sessionToken: next.sessionToken ?? prev?.sessionToken,
     apiKey: next.apiKey ?? prev?.apiKey,
-    baseUrl: next.baseUrl ?? prev?.baseUrl,
+    baseUrl: prev?.baseUrl ?? next.baseUrl,
     traceId: next.traceId ?? prev?.traceId,
   };
+}
+
+/** True when MCP_INTERNAL_KEY is configured and this request presented it (constant-time). */
+function internalKeyVerified(req: Request): boolean {
+  return INTERNAL_KEY.length > 0 && safeEqual(req.header("x-mcp-internal-key"), INTERNAL_KEY);
+}
+
+/** `X-Mcp-One-Shot: 1` marks a session as single-use (closed after its first tool result). */
+function isOneShot(req: Request): boolean {
+  const v = (req.header("x-mcp-one-shot") ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 /**
@@ -96,6 +128,8 @@ interface SessionEntry {
   auth: AuthContext;
   lastSeen: number;
   serviceName?: string;
+  /** Close the session as soon as a non-lifecycle JSON-RPC request has been answered. */
+  oneShot: boolean;
 }
 
 /**
@@ -109,7 +143,7 @@ function touchSession(sid: string, req: Request, serviceName?: string): SessionE
   if (!entry) return undefined;
   entry.lastSeen = Date.now();
   if (serviceName) entry.serviceName = serviceName;
-  // Rebind auth in case the caller rotated tokens / base URL.
+  // Rebind auth in case the caller rotated tokens (baseUrl stays bound).
   entry.auth = mergeAuth(entry.auth, extractAuthContext(req));
   setAuthForSession(sid, entry.auth);
   return entry;
@@ -159,6 +193,7 @@ app.use(
       "X-Mcp-Base-Url",
       "X-Mcp-Config",
       "X-Mcp-Internal-Key",
+      "X-Mcp-One-Shot",
     ],
     exposedHeaders: ["Mcp-Session-Id", "mcp-session-id", "mcp-protocol-version"],
     credentials: false,
@@ -187,8 +222,7 @@ app.get("/ping", health);
  */
 const requireInternalKey = (req: Request, res: Response, next: NextFunction) => {
   if (!INTERNAL_KEY) return next();
-  const presented = req.header("x-mcp-internal-key");
-  if (presented !== INTERNAL_KEY) {
+  if (!internalKeyVerified(req)) {
     res.status(403).json({
       jsonrpc: "2.0",
       error: { code: -32001, message: "Forbidden: invalid internal key" },
@@ -219,15 +253,26 @@ const handlePost = async (req: Request, res: Response) => {
   try {
     let transport: StreamableHTTPServerTransport | undefined;
 
-    if (incomingSessionId && sessions.has(incomingSessionId)) {
-      transport = touchSession(incomingSessionId, req, serviceName)!.transport;
-    } else if (!incomingSessionId && isInitializeRequest(payload)) {
+    let entry: SessionEntry | undefined;
+
+    if (incomingSessionId) {
+      entry = touchSession(incomingSessionId, req, serviceName);
+      if (!entry) {
+        // Unknown / evicted session: 404 per the Streamable HTTP spec (and the
+        // SDK transport), so clients know to re-initialize.
+        sendSessionNotFound(res);
+        return;
+      }
+      transport = entry.transport;
+    } else if (isInitializeRequest(payload)) {
       // Brand-new session: spin up a fresh transport + McpServer.
       const auth = extractAuthContext(req);
+      const oneShot = isOneShot(req);
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid) => {
-          sessions.set(sid, { transport: t, auth, lastSeen: Date.now(), serviceName });
+          entry = { transport: t, auth, lastSeen: Date.now(), serviceName, oneShot };
+          sessions.set(sid, entry);
           setAuthForSession(sid, auth);
         },
         enableDnsRebindingProtection: false,
@@ -255,6 +300,13 @@ const handlePost = async (req: Request, res: Response) => {
     }
 
     await transport.handleRequest(req, res, payload);
+
+    // One-shot sessions (the PHP rpcStateless bridge never sends DELETE):
+    // tear down as soon as the first real request has been answered.
+    if (entry?.oneShot && transport.sessionId && isTerminalOneShotRequest(payload)) {
+      res.once("finish", () => dropSession(transport!.sessionId!, true));
+      if (res.writableFinished) dropSession(transport.sessionId, true);
+    }
   } catch (err) {
     // Don't leak tokens. Use a stringified, header-free error.
     const message = err instanceof Error ? err.message : String(err);
@@ -278,14 +330,45 @@ const handlePost = async (req: Request, res: Response) => {
  */
 const handleStreamOrTerminate = async (req: Request, res: Response) => {
   const sessionId = req.header("mcp-session-id");
-  if (!sessionId || !sessions.has(sessionId)) {
-    res.status(400).send("invalid or missing Mcp-Session-Id header");
+  if (!sessionId) {
+    res.status(400).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" },
+      id: null,
+    });
     return;
   }
   void configFromHeader(req);
-  const entry = touchSession(sessionId, req, nonEmpty(req.params.serviceName))!;
+  const entry = touchSession(sessionId, req, nonEmpty(req.params.serviceName));
+  if (!entry) {
+    sendSessionNotFound(res);
+    return;
+  }
   await entry.transport.handleRequest(req, res);
 };
+
+/** 404 for an unknown/evicted Mcp-Session-Id — mirrors the SDK transport's own response. */
+function sendSessionNotFound(res: Response): void {
+  res.status(404).json({
+    jsonrpc: "2.0",
+    error: { code: -32001, message: "Session not found" },
+    id: null,
+  });
+}
+
+/**
+ * A JSON-RPC *request* (has an id) that is not `initialize`. Notifications
+ * (`notifications/initialized`) and the handshake itself keep a one-shot
+ * session alive; the first tool/list/call ends it.
+ */
+function isTerminalOneShotRequest(payload: unknown): boolean {
+  const msgs = Array.isArray(payload) ? payload : [payload];
+  return msgs.some((m) => {
+    if (!m || typeof m !== "object") return false;
+    const { id, method } = m as { id?: unknown; method?: unknown };
+    return id !== undefined && id !== null && method !== "initialize";
+  });
+}
 
 app.post(["/mcp", "/mcp/:serviceName"], handlePost);
 app.get(["/mcp", "/mcp/:serviceName"], handleStreamOrTerminate);
@@ -306,7 +389,8 @@ sweeper.unref();
 const httpServer = app.listen(PORT, HOST, () => {
   console.log(
     `[df-system-mcp] listening on http://${HOST}:${PORT}  (tools=${TOOL_COUNT}, df=${getBaseUrl()}, ` +
-      `internal_key=${INTERNAL_KEY ? "required" : "off"}, session_ttl=${SESSION_TTL_SECONDS}s)`,
+      `internal_key=${INTERNAL_KEY ? "required" : "off"}, session_ttl=${SESSION_TTL_SECONDS}s, ` +
+      `allowed_base_origins=${[...ALLOWED_BASE_ORIGINS].join("|")})`,
   );
 });
 
