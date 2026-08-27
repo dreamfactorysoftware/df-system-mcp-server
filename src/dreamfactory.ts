@@ -37,6 +37,11 @@ export function getAuthForSession(sessionId: string | undefined): AuthContext | 
   return authBySession.get(sessionId);
 }
 
+/** Number of sessions currently holding an auth context (for /health). */
+export function countAuthSessions(): number {
+  return authBySession.size;
+}
+
 /**
  * Build a query string from an object, skipping undefined values.
  */
@@ -54,6 +59,8 @@ function buildQuery(query?: Record<string, string | number | boolean | undefined
  * Centralised HTTP client for DreamFactory.
  *
  * - Injects X-DreamFactory-Session-Token from the supplied AuthContext.
+ * - Forwards X-DreamFactory-API-Key / X-DreamFactory-Trace-Id when bound.
+ * - Uses the per-session base URL (X-Mcp-Base-Url) when present, else DREAMFACTORY_URL.
  * - Sets Accept: application/json (and Content-Type when a body is present).
  * - Never logs the session token.
  * - Returns a uniform { ok, status, data | error } envelope.
@@ -74,7 +81,7 @@ export async function dreamFactoryFetch(
     };
   }
 
-  const base = getBaseUrl();
+  const base = (auth.baseUrl && auth.baseUrl.replace(/\/+$/, "")) || getBaseUrl();
   // Strip leading slash from path so caller can write "system/service" or "/system/service".
   const cleanPath = path.replace(/^\/+/, "");
   const url = `${base}/${cleanPath}${buildQuery(opts.query)}`;
@@ -83,8 +90,10 @@ export async function dreamFactoryFetch(
     Accept: "application/json",
     "X-DreamFactory-Session-Token": auth.sessionToken,
   };
+  if (auth.apiKey) headers["X-DreamFactory-API-Key"] = auth.apiKey;
+  if (auth.traceId) headers["X-DreamFactory-Trace-Id"] = auth.traceId;
 
-  let bodyInit: BodyInit | undefined;
+  let bodyInit: string | undefined;
   if (opts.body !== undefined && opts.body !== null) {
     headers["Content-Type"] = "application/json";
     bodyInit = JSON.stringify(opts.body);
