@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -8,8 +9,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * These tools cover /system/service — the table that holds every DreamFactory
  * connector (databases, file storage, email, scripts, etc).
  */
-export function registerServiceTools(server: McpServer): void {
-  server.tool(
+export function registerServiceTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "list_services",
     "List all DreamFactory services (database connectors, file storage, email, scripts, etc) registered on the platform. " +
       "Returns id, name, label, type, is_active, and description for each. " +
@@ -43,7 +46,9 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_service",
     "Retrieve a single DreamFactory service by numeric id OR by name. " +
       "Returns full configuration including the `config` object (credentials, host, port, etc) " +
@@ -62,7 +67,9 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "create_service",
     "Create a new DreamFactory service (database connector, file storage, email, script, etc). " +
       "PREREQUISITE STEPS: " +
@@ -111,7 +118,9 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "update_service",
     "Patch an existing DreamFactory service. Only the fields you provide in `patch` are modified; " +
       "everything else is left alone. Commonly used to flip `is_active`, change `label`, or update " +
@@ -133,7 +142,9 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "delete_service",
     "Permanently delete a DreamFactory service. This unregisters the connector and removes the /api/v2/{name}/ " +
       "endpoint. Existing role_service_access entries referring to this service will be cascaded. " +

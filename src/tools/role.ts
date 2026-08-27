@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -9,7 +10,7 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * per-HTTP-verb access masks via the related `role_service_access_by_role_id` collection.
  * An API key (app) without a role grants no access; the role's access entries are the gate.
  */
-export function registerRoleTools(server: McpServer): void {
+export function registerRoleTools(server: McpServer, opts?: RegisterToolOptions): void {
   // Schema for a single role_service_access entry. Mirrors the DB table.
   const accessEntry = z
     .object({
@@ -36,7 +37,9 @@ export function registerRoleTools(server: McpServer): void {
     })
     .describe("One row in role_service_access — a single permission grant.");
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "list_roles",
     "List all DreamFactory roles. Roles bundle a set of per-service permissions (via role_service_access). " +
       "Returns id, name, description, is_active for each. Use `filter` to narrow (e.g. \"is_active=true\").",
@@ -65,7 +68,9 @@ export function registerRoleTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_role",
     "Retrieve a single role by id, INCLUDING its full role_service_access list (the permission rows). " +
       "Use this when you need to read what a role actually grants — the bare role record only carries metadata.",
@@ -82,7 +87,9 @@ export function registerRoleTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "create_role",
     "Create a new DreamFactory role with optional inline service-access grants. " +
       "To grant permissions atomically with role creation, pass `role_service_access_by_role_id` " +
@@ -117,7 +124,9 @@ export function registerRoleTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "update_role",
     "Patch an existing role. To add/remove permission rows, include `role_service_access_by_role_id` " +
       "in the patch as the FULL desired list (DreamFactory replaces the collection wholesale). " +

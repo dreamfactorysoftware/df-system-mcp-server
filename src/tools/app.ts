@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -7,8 +8,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * Each app is bound to one role; that role's role_service_access_by_role_id
  * determines what calls authenticated by that app's api_key may do.
  */
-export function registerAppTools(server: McpServer): void {
-  server.tool(
+export function registerAppTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "list_apps",
     "List all DreamFactory apps (each app issues one API key and binds to one role). " +
       "Returns id, name, description, role_id, type, is_active. The api_key field is included.",
@@ -34,7 +37,9 @@ export function registerAppTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_app",
     "Retrieve a single app by id. Crucially, the response includes the `api_key` field — the credential " +
       "that downstream API consumers send as X-DreamFactory-API-Key. Use this to look up an existing key.",
@@ -48,7 +53,9 @@ export function registerAppTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "create_app",
     "Create a new DreamFactory app, which generates a new API key (returned in the `api_key` field of the response). " +
       "Apps are how external clients authenticate. Each app is bound to a SINGLE role (`role_id`); the role determines " +

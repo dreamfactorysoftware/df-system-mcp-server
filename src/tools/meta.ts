@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -7,8 +8,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * These are the "look before you leap" tools the LLM should call before
  * issuing destructive or creation calls.
  */
-export function registerMetaTools(server: McpServer): void {
-  server.tool(
+export function registerMetaTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "list_service_types",
     "List every service TYPE that DreamFactory can register (mysql, pgsql, mongodb, snowflake, local_file, s3, " +
       "smtp, script_php, etc). This is the catalogue of valid `type` values for create_service. " +
@@ -33,7 +36,9 @@ export function registerMetaTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_service_type_schema",
     "Fetch the configuration schema for a single service type (e.g. \"mysql\", \"snowflake\", \"s3\"). " +
       "Returns the type's metadata plus a `config_schema` array describing every field the `config` object " +
@@ -53,7 +58,9 @@ export function registerMetaTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_environment",
     "Return the DreamFactory environment summary: platform version, server software, available authentication " +
       "providers, server-side settings, and license details. Useful for: (a) confirming connectivity, " +

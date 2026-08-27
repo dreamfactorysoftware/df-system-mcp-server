@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -7,8 +8,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * that isn't covered by a dedicated tool above. Defense-in-depth path restriction —
  * the real authorisation gate is server-side RBAC on the session token.
  */
-export function registerGenericTools(server: McpServer): void {
-  server.tool(
+export function registerGenericTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "call_system_api",
     "ESCAPE HATCH — call any DreamFactory system/* or user/* endpoint that the dedicated tools above don't cover. " +
       "Prefer the dedicated tools when available (they have richer descriptions and validation). " +
