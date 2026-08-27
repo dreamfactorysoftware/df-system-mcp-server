@@ -1,0 +1,28 @@
+# Example: run the System API MCP daemon next to an existing DreamFactory
+# docker-compose stack (network `dreamfactory_default`).
+#
+#   docker compose -f docker-compose.example.yml up -d --build
+#
+# On the DreamFactory side set (in the `web` container env):
+#   MCP_SYSTEM_DAEMON_ENABLED=true
+#   MCP_SYSTEM_DAEMON_URL=http://df-system-mcp:3700
+#   MCP_INTERNAL_KEY=<same value as below, optional>
+services:
+  df-system-mcp:
+    build: .
+    container_name: df-system-mcp
+    restart: unless-stopped
+    environment:
+      PORT: "3700"
+      HOST: "0.0.0.0"
+      DREAMFACTORY_URL: http://web/api/v2
+      # MCP_INTERNAL_KEY: change-me
+      # SESSION_TTL_SECONDS: "1800"
+    expose:
+      - "3700"
+    networks:
+      - dreamfactory_default
+
+networks:
+  dreamfactory_default:
+    external: true

@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1
 
-# Single-stage build: tsx handles TS at runtime, sidestepping a tsc OOM that
-# happens when type-checking @modelcontextprotocol/sdk on memory-constrained
-# build hosts. Startup cost of tsx-transpile is sub-second and only paid once.
+# Single-stage build: tsx handles TS at runtime so the image needs no tsc
+# step (tsc is still run in CI via `npm run build`). Startup cost of
+# tsx-transpile is sub-second and only paid once.
+# Optional runtime env (see README): MCP_INTERNAL_KEY, SESSION_TTL_SECONDS.
 FROM node:20-alpine
 WORKDIR /app
 # Defer NODE_ENV=production until AFTER `npm install`. With production set,

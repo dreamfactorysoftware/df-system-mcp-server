@@ -2,45 +2,103 @@
 
 Standalone Node/TypeScript MCP server that exposes DreamFactory's **control-plane System API**
 (`/api/v2/system/*`) as MCP tools. Built so an LLM can administer a DreamFactory instance
-(create services, define roles, mint API keys, manage admins) over natural language.
+(create services, define roles, mint API keys, inspect admins/environment) over natural language.
 
 This server is **distinct** from:
 
-- `df-mcp-server` — Laravel daemon proxy for **data-plane** table CRUD.
-- `df-mcp` — Claude Desktop extension for data-plane CRUD.
-- `df-ai-backend` — Express MCP server for data-plane CRUD using per-API session manager.
+- `df-mcp-server` (PHP) — the DreamFactory package that registers the `mcp` (data-plane) and
+  `system_mcp` (this server) service types, provides OAuth 2.1 and proxies to the daemons.
+- `df-mcp-server/daemon` — the data-plane Node daemon (tables / schema / procs / files).
+- `df-ai-backend` — Express MCP server for data-plane CRUD using a per-API session manager.
+
+It runs in two modes at once, on the same port:
+
+| Mode | Caller | Route | Body |
+| ---- | ------ | ----- | ---- |
+| **Proxied** | `df-mcp-server` (PHP `McpDaemonClient`) for a `system_mcp` service | `/mcp/{service}` | PHP envelope `{ _mcpPayload, _mcpConfig, _mcpAvailableServices }` |
+| **Direct** | `df-ai-assistant`, any MCP client with a DF session token | `/mcp` | bare JSON-RPC |
 
 ## Endpoints
 
-| Method  | Path     | Purpose                                                                        |
-| ------- | -------- | ------------------------------------------------------------------------------ |
-| `GET`   | `/health` | Liveness probe: `{ status, service, version, tools, dreamfactory_url }`        |
-| `POST`  | `/mcp`    | MCP JSON-RPC requests (Streamable HTTP transport).                             |
-| `GET`   | `/mcp`    | SSE stream for server-to-client notifications. Requires `Mcp-Session-Id`.      |
-| `DELETE`| `/mcp`    | Explicit MCP session termination. Requires `Mcp-Session-Id`.                   |
+| Method   | Path                      | Purpose |
+| -------- | ------------------------- | ------- |
+| `GET`    | `/health`, `/ping`        | Liveness: `{ status, service, version, tools, mode: "stateful", active_sessions, dreamfactory_url }` |
+| `POST`   | `/mcp`, `/mcp/:service`   | MCP JSON-RPC requests (Streamable HTTP transport). Accepts bare JSON-RPC or the PHP envelope. |
+| `GET`    | `/mcp`, `/mcp/:service`   | SSE stream for server-to-client notifications. Requires `Mcp-Session-Id`. |
+| `DELETE` | `/mcp`, `/mcp/:service`   | Explicit MCP session termination. Requires `Mcp-Session-Id`. |
 
+`:service` is the DreamFactory service name the PHP proxy routed through; it is only used in logs.
 Default port: **3700** (override with `PORT`).
+
+### Proxy contract (what `df-mcp-server` sends)
+
+Request headers (all read per request, re-bound to the MCP session on every call):
+
+| Header | Meaning |
+| ------ | ------- |
+| `X-DreamFactory-Session-Token` | DF session token of the OAuth'd user. **Required** for tool calls. |
+| `X-DreamFactory-API-Key` | Optional DF API key (`app_id` on the service). Forwarded verbatim. |
+| `X-Mcp-Base-Url` | DF base URL ending in `/api/v2`. Overrides `DREAMFACTORY_URL` for that session. |
+| `X-DreamFactory-Trace-Id` | Optional trace id, forwarded back on every DF call. |
+| `X-Mcp-Internal-Key` | Required when `MCP_INTERNAL_KEY` is set (else `403 {code:-32001}`). |
+| `X-Mcp-Config` | `GET`/`DELETE` only: JSON service config (POST carries it in the envelope). |
+| `Mcp-Session-Id`, `Last-Event-ID`, `Content-Type`, `Accept` | Standard Streamable HTTP headers, passed through. |
+
+POST body envelope:
+
+```json
+{
+  "_mcpPayload": { "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "...": "..." } },
+  "_mcpConfig": { "disabled_tools": ["delete_service"], "custom_tools": [], "app_id": null },
+  "_mcpAvailableServices": []
+}
+```
+
+- `_mcpPayload` is the JSON-RPC message; `isInitializeRequest` is evaluated on it.
+- `_mcpConfig.disabled_tools` — tool names that are **not registered** for that session
+  (unknown names ignored). `custom_tools` is ignored (this server has no custom-tool runtime).
+- `_mcpAvailableServices` is ignored (System API tools do not depend on data services).
+
+Responses are whatever the MCP SDK's Streamable HTTP transport produces (`application/json`
+or `text/event-stream`), plus `Mcp-Session-Id` on `initialize`. The PHP client streams SSE
+through untouched.
+
+### Direct mode (df-ai-assistant)
+
+`POST /mcp` with `X-DreamFactory-Session-Token` (or `Authorization: Bearer <token>`) and,
+after `initialize`, `Mcp-Session-Id`. No envelope. This contract is unchanged from 0.1.0
+and is covered by `tests/smoke.test.ts`.
 
 ## Authentication
 
-Every tool call needs a DreamFactory session token. Send it on **every HTTP request to `/mcp`**
-under either header:
-
-- `X-DreamFactory-Session-Token: <token>` (preferred)
-- `Authorization: Bearer <token>`
-
-The token is forwarded to DreamFactory as `X-DreamFactory-Session-Token`. The token is
-bound to the MCP session id on `initialize` and refreshed on every subsequent request.
-
-If no token is bound at tool-call time, the tool returns an `authentication required` error.
+Every tool call needs a DreamFactory session token, bound to the MCP session on `initialize`
+and refreshed on every subsequent request. If no token is bound at tool-call time, the tool
+returns an `authentication required` error. Tools execute with exactly the DreamFactory role
+of that token — non-admin tokens cannot administer the instance. Tokens and keys are never logged.
 
 ## Configuration
 
-| Env var            | Default                | Purpose                                              |
-| ------------------ | ---------------------- | ---------------------------------------------------- |
-| `PORT`             | `3700`                 | HTTP listen port.                                    |
-| `HOST`             | `0.0.0.0`              | HTTP listen host.                                    |
-| `DREAMFACTORY_URL` | `http://web/api/v2`    | DreamFactory base URL (no trailing slash required).  |
+| Env var               | Default             | Purpose |
+| --------------------- | ------------------- | ------- |
+| `PORT`                | `3700`              | HTTP listen port. |
+| `HOST`                | `0.0.0.0`           | HTTP listen host. |
+| `DREAMFACTORY_URL`    | `http://web/api/v2` | Default DreamFactory base URL (no trailing slash required). Overridden per session by `X-Mcp-Base-Url`. |
+| `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
+| `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). |
+
+### DreamFactory side
+
+In the DreamFactory `.env` (df-mcp-server >= 1.4 / DF 7.7.x):
+
+```
+MCP_SYSTEM_DAEMON_ENABLED=true
+MCP_SYSTEM_DAEMON_URL=http://df-system-mcp:3700   # or http://127.0.0.1:3700 for bare node
+MCP_INTERNAL_KEY=change-me                        # optional, must match this daemon
+```
+
+Then create a service of type **System API MCP Server** (`system_mcp`), e.g. `sysmcp`, and point
+an MCP client at `https://<df-host>/mcp/sysmcp` (OAuth 2.1 with dynamic client registration) or
+call `POST /api/v2/sysmcp/rpc` with a DF session token.
 
 ## Tools
 
@@ -53,16 +111,20 @@ If no token is bound at tool-call time, the tool returns an `authentication requ
 - **Admins** (1): `list_admins`
 - **Escape hatch** (1): `call_system_api` — any `system/*` or `user/*` path the dedicated tools miss.
 
+Any of these can be hidden per DreamFactory service via `disabled_tools` in the service config.
+
 ## Development
 
 ```bash
 npm install
-npm run build          # tsc → build/
-npm run dev            # tsx watch mode
-npm test               # smoke test
+npm run build          # tsc → build/   (NODE_OPTIONS=--max-old-space-size=4096 if tsc OOMs)
+npm run dev            # tsx src/index.ts
+npm test               # runs every tests/*.test.ts (smoke + proxy contract)
 ```
 
-## Docker
+## Running
+
+### Docker
 
 ```bash
 docker build -t df-system-mcp .
@@ -72,7 +134,20 @@ docker run --rm -p 3700:3700 \
   df-system-mcp
 ```
 
-## Calling from the PHP orchestrator
+Or with the bundled example compose file (joins the `dreamfactory_default` network):
+
+```bash
+docker compose -f docker-compose.example.yml up -d --build
+```
+
+### Bare node
+
+```bash
+npm install
+PORT=3700 HOST=127.0.0.1 DREAMFACTORY_URL=http://localhost/api/v2 scripts/start-daemon.sh
+```
+
+## Calling from the PHP orchestrator (direct mode)
 
 The orchestrator is an MCP client. Use any MCP SDK that speaks Streamable HTTP, point it at
 `http://df-system-mcp:3700/mcp`, set the auth header on every HTTP request, and invoke tools
@@ -88,3 +163,5 @@ by name. The expected response shape per tool is:
 ```
 
 Errors set `isError: true` and embed `{ error, status, operation, details }` in the text payload.
+
+See `CHANGELOG.md` for release notes.
