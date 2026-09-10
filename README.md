@@ -96,6 +96,7 @@ of that token — non-admin tokens cannot administer the instance. Tokens and ke
 | `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
 | `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). Requests with an evicted id get `404 Session not found`. |
 | `MCP_ALLOWED_BASE_URLS` | *(unset)*         | Comma-separated extra origins that untrusted callers may name in `X-Mcp-Base-Url` (the `DREAMFACTORY_URL` origin is always allowed). Not needed when `MCP_INTERNAL_KEY` is set. |
+| `MCP_EXPOSE_API_KEYS` | `false`             | `true` disables API-key masking in `list_apps`, `get_app` and `call_system_api`, so full keys are sent to the LLM. Leave unset in production; see [API key masking](#api-key-masking). |
 
 ### Trust boundary
 
@@ -133,11 +134,27 @@ call `POST /api/v2/sysmcp/rpc` with a DF session token.
 - **Services** (5): `list_services`, `get_service`, `create_service`, `update_service`, `delete_service`
 - **Meta** (3): `list_service_types`, `get_service_type_schema`, `get_environment`
 - **Roles** (4): `list_roles`, `create_role`, `get_role`, `update_role`
-- **Apps / API keys** (3): `list_apps`, `create_app`, `get_app`
+- **Apps / API keys** (3): `list_apps`, `create_app`, `get_app` (keys masked except on `create_app`, see below)
 - **Admins** (1): `list_admins`
 - **Escape hatch** (1): `call_system_api` — any `system/*` or `user/*` path the dedicated tools miss.
 
 Any of these can be hidden per DreamFactory service via `disabled_tools` in the service config.
+
+### API key masking
+
+Tool results go to an LLM, and from there into provider logs and DreamFactory's prompt logs, so app
+API keys are masked by default. In every `list_apps`, `get_app` and `call_system_api` response,
+each object property named `api_key`, at any depth (single records, `{ resource: [...] }` lists,
+records nested via `related=` such as `app_by_role_id`), is rewritten as:
+
+```json
+{ "api_key": null, "api_key_hint": "…5a88" }
+```
+
+- `api_key_hint` is `"…"` plus the key's last 4 characters. Keys shorter than 16 characters get a
+  bare `"…"`; a null or empty key gets `api_key_hint: null`.
+- `create_app` is the exception: it returns the real new key once, because the caller needs it.
+- Set `MCP_EXPOSE_API_KEYS=true` to turn masking off.
 
 ## Development
 

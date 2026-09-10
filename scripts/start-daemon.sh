@@ -11,6 +11,7 @@
 #                        overridden per-session by X-Mcp-Base-Url from df-mcp-server
 #   MCP_INTERNAL_KEY     shared secret; when set, every /mcp* request must send X-Mcp-Internal-Key
 #   SESSION_TTL_SECONDS  idle MCP session eviction window (default 1800)
+#   MCP_EXPOSE_API_KEYS  "true" sends full app API keys to the LLM (default: masked)
 set -eu
 cd "$(dirname "$0")/.."
 if [ ! -x node_modules/.bin/tsx ]; then

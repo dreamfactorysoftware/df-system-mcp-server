@@ -24,6 +24,10 @@ const INTERNAL_KEY = "test";
 const SESSION_TOKEN = "sess-token-abc";
 const API_KEY = "api-key-xyz";
 const TRACE_ID = "trace-123";
+/** App keys the mock DreamFactory returns; must never reach the MCP client from read tools. */
+const APP_KEY_A = "36fda24fe5588fa4285ac6c6c2fdfbdb6b6bc9834699774c9bf777f706d05a88";
+const APP_KEY_B = "b1946ac92492d2347c6235b4d2611184d8e7a1c1c3f0e0b4a1e2f3c4d5e6f7a9";
+const NEW_APP_KEY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 interface SeenRequest {
   method: string;
@@ -41,7 +45,30 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
       seen.push({ method: req.method ?? "", url: req.url ?? "", headers: req.headers, body });
       const url = req.url ?? "";
       res.setHeader("content-type", "application/json");
-      if (req.method === "GET" && url.startsWith("/api/v2/system/service")) {
+      if (req.method === "GET" && url.startsWith("/api/v2/system/app/4")) {
+        res.end(JSON.stringify({ id: 4, name: "reporting_app", role_id: 2, is_active: true, api_key: APP_KEY_A }));
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/app")) {
+        res.end(
+          JSON.stringify({
+            resource: [
+              { id: 4, name: "reporting_app", role_id: 2, api_key: APP_KEY_A },
+              { id: 5, name: "partner", role_id: 3, api_key: APP_KEY_B },
+            ],
+            meta: { count: 2 },
+          }),
+        );
+      } else if (req.method === "POST" && url.startsWith("/api/v2/system/app")) {
+        res.statusCode = 201;
+        res.end(JSON.stringify({ resource: [{ id: 6, name: "NewApp", role_id: 2, api_key: NEW_APP_KEY }] }));
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/role/2")) {
+        res.end(
+          JSON.stringify({
+            id: 2,
+            name: "reports",
+            app_by_role_id: [{ id: 4, name: "reporting_app", api_key: APP_KEY_A }],
+          }),
+        );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service")) {
         res.end(
           JSON.stringify({
             resource: [{ id: 1, name: "mysql-prod", type: "mysql", is_active: true }],
@@ -90,6 +117,8 @@ async function startServer(): Promise<ChildProcess> {
         PORT: String(PORT),
         HOST: "127.0.0.1",
         MCP_INTERNAL_KEY: INTERNAL_KEY,
+        // Masking is the default under test; don't inherit an opt-out from the shell.
+        MCP_EXPOSE_API_KEYS: "",
         // Deliberately wrong so we can prove X-Mcp-Base-Url wins.
         DREAMFACTORY_URL: "http://127.0.0.1:9/api/v2",
       },
@@ -365,6 +394,55 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.notEqual(okResult.isError, true, JSON.stringify(okResult));
     assert.equal(mock.seen.length, seenBefore + 1);
     assert.equal(mock.seen[mock.seen.length - 1].url, "/api/v2/system/service?limit=1");
+  });
+
+  await t.test("api_key is masked by list_apps, get_app and call_system_api; create_app returns it", async () => {
+    const sid = await openSession(baseUrl);
+    const call = async (id: number, name: string, args: Record<string, unknown>) => {
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, id);
+      assert.notEqual(result.isError, true, `${name}: ${JSON.stringify(result)}`);
+      return (result.content as { text: string }[])[0].text;
+    };
+    const noKeys = (text: string, label: string) => {
+      assert.ok(!text.includes(APP_KEY_A), `${label} leaked APP_KEY_A`);
+      assert.ok(!text.includes(APP_KEY_B), `${label} leaked APP_KEY_B`);
+    };
+
+    const listText = await call(20, "list_apps", {});
+    noKeys(listText, "list_apps");
+    const list = JSON.parse(listText) as { resource: Record<string, unknown>[]; meta: { count: number } };
+    assert.equal(list.meta.count, 2);
+    assert.deepEqual(
+      list.resource.map((a) => [a.api_key, a.api_key_hint]),
+      [
+        [null, "…5a88"],
+        [null, "…f7a9"],
+      ],
+    );
+
+    const getText = await call(21, "get_app", { id: 4 });
+    noKeys(getText, "get_app");
+    const app = JSON.parse(getText) as Record<string, unknown>;
+    assert.equal(app.name, "reporting_app");
+    assert.equal(app.api_key, null);
+    assert.equal(app.api_key_hint, "…5a88");
+
+    const hatchText = await call(22, "call_system_api", {
+      method: "GET",
+      path: "system/role/2",
+      query: { related: "app_by_role_id" },
+    });
+    noKeys(hatchText, "call_system_api related=app_by_role_id");
+    assert.equal(JSON.parse(hatchText).app_by_role_id[0].api_key_hint, "…5a88");
+    noKeys(await call(23, "call_system_api", { method: "GET", path: "system/app" }), "call_system_api system/app");
+
+    const createText = await call(24, "create_app", { name: "NewApp", role_id: 2 });
+    assert.equal(JSON.parse(createText).resource[0].api_key, NEW_APP_KEY, "create_app must return the real new key");
   });
 
   await t.test("unknown / evicted Mcp-Session-Id returns 404 Session not found", async () => {

@@ -3,6 +3,7 @@ import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 import { guardControlPlanePath } from "../path-guard";
+import { maskResult } from "../redact";
 
 /**
  * Generic escape hatch: lets the LLM hit any DreamFactory system/* or user/* endpoint
@@ -19,7 +20,9 @@ export function registerGenericTools(server: McpServer, opts?: RegisterToolOptio
       "Use this for: less common system endpoints (system/cors, system/email_template, system/event, system/script_type, " +
       "system/lookup, system/cache, system/custom, system/limit, etc.) and for /user/* profile operations. " +
       "Paths are relative to /api/v2 and MUST begin with 'system/' or 'user/'. Provide query as a flat object of " +
-      "string values (do NOT embed '?' in path); provide body as a JSON object for POST/PATCH. Returns the raw DreamFactory response.",
+      "string values (do NOT embed '?' in path); provide body as a JSON object for POST/PATCH. Returns the DreamFactory " +
+      "response, except that every `api_key` field at any depth is masked (null, plus an `api_key_hint` of \"…\" and the " +
+      "last 4 characters). To mint a key the caller can actually see, use create_app.",
     {
       method: z.enum(["GET", "POST", "PATCH", "PUT", "DELETE"]).describe("HTTP verb."),
       path: z
@@ -66,7 +69,9 @@ export function registerGenericTools(server: McpServer, opts?: RegisterToolOptio
         body,
         query,
       });
-      return toToolResponse("call_system_api", result);
+      // system/app (directly or nested via related=app_by_role_id etc.) carries
+      // api_key; mask it at any depth so this hatch can't bypass list_apps/get_app.
+      return toToolResponse("call_system_api", maskResult(result));
     },
   );
 }

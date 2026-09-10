@@ -2,6 +2,25 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
+## Unreleased
+
+### Security
+- App API keys are no longer sent to the LLM. `list_apps`, `get_app` and
+  `call_system_api` rewrite every `api_key` property, at any depth (single
+  records, `{ resource: [...] }`, related records such as `app_by_role_id`),
+  to `api_key: null` plus `api_key_hint: "…" + last 4 characters` (bare `"…"`
+  for keys under 16 characters, `null` for no key). Helper: `src/redact.ts`.
+- `create_app` still returns the real new key, once; its description now says so.
+
+### Added
+- `MCP_EXPOSE_API_KEYS=true` env var disables the masking (default: masked).
+- `tests/redact.test.ts` (unit) and a proxy-contract case covering masking in
+  `list_apps`, `get_app`, `call_system_api` and the unmasked `create_app`.
+
+### Changed
+- `get_app` / `list_apps` descriptions no longer advertise the `api_key`
+  field ("Crucially, the response includes the api_key field…").
+
 ## 0.2.0 — 2026-08-27
 
 Speaks the `df-mcp-server` (PHP) daemon proxy contract so a DreamFactory
