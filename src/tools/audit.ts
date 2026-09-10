@@ -68,15 +68,17 @@ export function registerAuditTools(server: McpServer, opts?: RegisterToolOptions
     "READ-ONLY access-usage audit: when each app (API key), role or user last made an authorized request or was " +
       "last denied, with cleanup flags. Use it to find credentials and roles that look unused. " +
       "Each row: subject_type, subject_id, name (app name / role name / user email), is_active, last_used_at, " +
-      "last_denied_at, last_service, last_status; requests_30d and top_services (null when meta.ledger_available " +
+      "last_denied_at, last_service, last_status; last_service/last_status describe the last USE (any request not " +
+      "rejected with 401/403), while a 401/403 only moves last_denied_at; " +
+      "requests_30d and top_services (null when meta.ledger_available " +
       "is false, e.g. open-source installs); users also carry last_login_date and is_sys_admin. " +
       "Flags: never_used = no authorized request recorded; stale = last use older than stale_days; " +
       "disabled_but_attempted = inactive, yet clients still send it (recent denials: find that client before " +
       "removing anything); role_unreferenced (roles only, else null) = no app, user assignment, auth-provider " +
       "mapping or other config points at the role. " +
-      "IMPORTANT: usage is only recorded from when tracking started (the upgrade that added it, possibly " +
-      "backfilled from the activity ledger), so on a fresh install or recent upgrade never_used/stale mostly mean " +
-      "'no traffic seen yet'; read `meta` (generated_at, ledger_available) and state that caveat. " +
+      "IMPORTANT: usage is only recorded from when tracking started, so never_used means 'no traffic recorded " +
+      "since meta.tracking_started_at' (earliest recorded activity of any kind; null = nothing recorded yet). " +
+      "If that date is recent (fresh install or upgrade), say so and treat never_used/stale as weak evidence. " +
       "Recommend DISABLING first (is_active=false: update_role for roles, call_system_api PATCH system/app/{id} or " +
       "system/user/{id} for apps and users), watching for breakage, and only then deleting; never delete " +
       "straight from this report. Never returns API keys.",

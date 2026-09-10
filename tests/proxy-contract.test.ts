@@ -101,6 +101,7 @@ function accessUsageFixture(url: string): unknown {
       subject,
       stale_days: Number(q.get("stale_days") ?? 90),
       generated_at: "2026-09-10 16:30:00",
+      tracking_started_at: "2026-08-01 09:15:00",
       ledger_available: true,
     },
   };
@@ -566,6 +567,7 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal(flaggedBody.meta.only_flagged, true);
     assert.equal(flaggedBody.meta.unfiltered_count, 4);
     assert.equal(flaggedBody.meta.generated_at, "2026-09-10 16:30:00", "DF meta preserved");
+    assert.equal(flaggedBody.meta.tracking_started_at, "2026-08-01 09:15:00", "tracking_started_at preserved");
 
     // Roles: explicit params pass through; role_unreferenced=false is not a flag.
     const roles = await call({ subject: "role", stale_days: 30, only_flagged: true });

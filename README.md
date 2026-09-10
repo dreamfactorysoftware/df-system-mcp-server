@@ -158,8 +158,10 @@ a permission error.
 | *(always)* | | `include_never_used=true` |
 
 The description tells the model to recommend disabling (`is_active=false`) before deleting, and that
-`never_used` on a fresh install or upgrade only means no traffic has been recorded since tracking
-started (`meta.ledger_available` says whether 30-day request counts are available).
+`never_used` only means no traffic has been recorded since `meta.tracking_started_at` (the earliest
+recorded activity; `null` when nothing has been recorded yet). `last_service` / `last_status` describe
+the last use (any request not rejected with 401/403); a 401/403 only moves `last_denied_at`.
+`meta.ledger_available` says whether `requests_30d` / `top_services` are populated.
 
 ### API key masking
 

@@ -25,8 +25,10 @@ Adds a usage-audit tool and stops sending app API keys to the LLM. Tool count
   `include_never_used=true`. A 404 becomes a "requires a DreamFactory version
   that provides system/access_usage (df-system 0.7.0 or later)" tool error; a
   403 becomes a permission error. The description tells the model to disable
-  before deleting and that "never used" only covers the time since tracking
-  started. It can be hidden with `disabled_tools`.
+  before deleting, that "never used" only covers the time since
+  `meta.tracking_started_at`, and that `last_service`/`last_status` describe
+  the last use (401/403 only move `last_denied_at`). It can be hidden with
+  `disabled_tools`.
 - Proxy-contract cases: `get_access_audit` param passthrough, `only_flagged`,
   argument validation, 404/403 handling, `disabled_tools`.
 - `MCP_EXPOSE_API_KEYS=true` env var disables the masking (default: masked).
