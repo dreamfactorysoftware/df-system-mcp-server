@@ -36,8 +36,79 @@ interface SeenRequest {
   body: string;
 }
 
-function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: SeenRequest[] }> {
+/** Mutable mock behaviour, so one mock can play both a new and an old DreamFactory. */
+interface MockState {
+  /** 200 serves the fixture; 404 = DF without system/access_usage; 403 = restricted admin. */
+  accessUsageStatus: number;
+}
+
+function usageRow(overrides: Record<string, unknown>): Record<string, unknown> {
+  return {
+    subject_type: "app",
+    is_active: true,
+    last_used_at: "2026-09-10 16:08:12",
+    last_denied_at: null,
+    last_service: "db",
+    last_status: 200,
+    never_used: false,
+    stale: false,
+    disabled_but_attempted: false,
+    role_unreferenced: null,
+    last_login_date: null,
+    is_sys_admin: null,
+    requests_30d: 57,
+    top_services: [{ service: "db", requests: 50 }],
+    ...overrides,
+  };
+}
+
+/** system/access_usage fixture, shaped per the df-system contract. */
+function accessUsageFixture(url: string): unknown {
+  const q = new URL(url, "http://mock").searchParams;
+  const subject = q.get("subject") ?? "app";
+  const resource =
+    subject === "role"
+      ? [
+          usageRow({ subject_type: "role", subject_id: 2, name: "reports", role_unreferenced: false }),
+          usageRow({
+            subject_type: "role",
+            subject_id: 9,
+            name: "orphan",
+            last_used_at: null,
+            last_service: null,
+            last_status: null,
+            role_unreferenced: true,
+            requests_30d: 0,
+            top_services: [],
+          }),
+        ]
+      : [
+          usageRow({ subject_id: 4, name: "reporting_app" }),
+          usageRow({ subject_id: 5, name: "never", last_used_at: null, never_used: true, requests_30d: 0 }),
+          usageRow({ subject_id: 6, name: "old", last_used_at: "2026-01-02 03:04:05", stale: true, requests_30d: 0 }),
+          usageRow({
+            subject_id: 7,
+            name: "revoked",
+            is_active: false,
+            last_denied_at: "2026-09-09 10:00:00",
+            last_status: 403,
+            disabled_but_attempted: true,
+          }),
+        ];
+  return {
+    resource,
+    meta: {
+      subject,
+      stale_days: Number(q.get("stale_days") ?? 90),
+      generated_at: "2026-09-10 16:30:00",
+      ledger_available: true,
+    },
+  };
+}
+
+function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: SeenRequest[]; state: MockState }> {
   const seen: SeenRequest[] = [];
+  const state: MockState = { accessUsageStatus: 200 };
   const server = createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
@@ -45,7 +116,18 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
       seen.push({ method: req.method ?? "", url: req.url ?? "", headers: req.headers, body });
       const url = req.url ?? "";
       res.setHeader("content-type", "application/json");
-      if (req.method === "GET" && url.startsWith("/api/v2/system/app/4")) {
+      if (req.method === "GET" && url.startsWith("/api/v2/system/access_usage")) {
+        if (state.accessUsageStatus === 200) {
+          res.end(JSON.stringify(accessUsageFixture(url)));
+        } else {
+          res.statusCode = state.accessUsageStatus;
+          const message =
+            state.accessUsageStatus === 404
+              ? "Resource 'access_usage' not found for service 'system'."
+              : "Access Forbidden.";
+          res.end(JSON.stringify({ error: { code: state.accessUsageStatus, message } }));
+        }
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/app/4")) {
         res.end(JSON.stringify({ id: 4, name: "reporting_app", role_id: 2, is_active: true, api_key: APP_KEY_A }));
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/app")) {
         res.end(
@@ -88,7 +170,7 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
     server.listen(0, "127.0.0.1", () => {
       const addr = server.address();
       const port = typeof addr === "object" && addr ? addr.port : 0;
-      resolve({ server, port, seen });
+      resolve({ server, port, seen, state });
     });
   });
 }
@@ -443,6 +525,108 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
 
     const createText = await call(24, "create_app", { name: "NewApp", role_id: 2 });
     assert.equal(JSON.parse(createText).resource[0].api_key, NEW_APP_KEY, "create_app must return the real new key");
+  });
+
+  await t.test("get_access_audit: param passthrough, only_flagged, validation, 404/403", async () => {
+    const sid = await openSession(baseUrl);
+    let id = 300;
+    const callRaw = async (args: Record<string, unknown>) => {
+      const rid = ++id;
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id: rid, method: "tools/call", params: { name: "get_access_audit", arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      return { rid, messages: res.messages };
+    };
+    const call = async (args: Record<string, unknown>) => {
+      const { rid, messages } = await callRaw(args);
+      const result = rpcResult(messages, rid);
+      return { isError: result.isError === true, text: (result.content as { text: string }[])[0].text };
+    };
+    type Audit = { resource: { subject_id: number }[]; meta: Record<string, unknown> };
+
+    // Defaults: subject=app, stale_days=90, include_never_used pinned true.
+    const all = await call({});
+    assert.equal(all.isError, false, all.text);
+    assert.equal(
+      mock.seen[mock.seen.length - 1].url,
+      "/api/v2/system/access_usage?subject=app&stale_days=90&include_never_used=true",
+    );
+    assert.equal(mock.seen[mock.seen.length - 1].headers["x-dreamfactory-session-token"], SESSION_TOKEN);
+    const allBody = JSON.parse(all.text) as Audit;
+    assert.deepEqual(allBody.resource.map((r) => r.subject_id), [4, 5, 6, 7]);
+    assert.equal(allBody.meta.ledger_available, true);
+    assert.equal(allBody.meta.only_flagged, undefined, "meta untouched when not filtering");
+
+    // only_flagged keeps never_used / stale / disabled_but_attempted rows.
+    const flagged = await call({ only_flagged: true });
+    const flaggedBody = JSON.parse(flagged.text) as Audit;
+    assert.deepEqual(flaggedBody.resource.map((r) => r.subject_id), [5, 6, 7]);
+    assert.equal(flaggedBody.meta.only_flagged, true);
+    assert.equal(flaggedBody.meta.unfiltered_count, 4);
+    assert.equal(flaggedBody.meta.generated_at, "2026-09-10 16:30:00", "DF meta preserved");
+
+    // Roles: explicit params pass through; role_unreferenced=false is not a flag.
+    const roles = await call({ subject: "role", stale_days: 30, only_flagged: true });
+    assert.equal(
+      mock.seen[mock.seen.length - 1].url,
+      "/api/v2/system/access_usage?subject=role&stale_days=30&include_never_used=true",
+    );
+    assert.deepEqual((JSON.parse(roles.text) as Audit).resource.map((r) => r.subject_id), [9]);
+
+    // Invalid args never reach DreamFactory.
+    for (const bad of [{ stale_days: 0 }, { subject: "service" }]) {
+      const seenBefore = mock.seen.length;
+      const { rid, messages } = await callRaw(bad);
+      const msg = messages.find((m) => (m as { id?: unknown }).id === rid) as {
+        error?: unknown;
+        result?: { isError?: boolean };
+      };
+      assert.ok(msg.error !== undefined || msg.result?.isError === true, `${JSON.stringify(bad)} must be rejected`);
+      assert.equal(mock.seen.length, seenBefore, `${JSON.stringify(bad)} must not reach DreamFactory`);
+    }
+
+    try {
+      mock.state.accessUsageStatus = 404;
+      const old = await call({});
+      assert.equal(old.isError, true);
+      const oldErr = JSON.parse(old.text) as { error: string; status: number; operation: string };
+      assert.equal(oldErr.status, 404);
+      assert.equal(oldErr.operation, "get_access_audit");
+      assert.match(oldErr.error, /requires a DreamFactory version that provides system\/access_usage/);
+      assert.match(oldErr.error, /df-system 0\.7\.0/);
+
+      mock.state.accessUsageStatus = 403;
+      const denied = await call({ subject: "user" });
+      assert.equal(denied.isError, true);
+      const deniedErr = JSON.parse(denied.text) as { error: string; status: number };
+      assert.equal(deniedErr.status, 403);
+      assert.match(deniedErr.error, /permission denied/);
+    } finally {
+      mock.state.accessUsageStatus = 200;
+    }
+  });
+
+  await t.test("disabled_tools can hide get_access_audit", async () => {
+    const config = { disabled_tools: ["get_access_audit"] };
+    const sid = await openSession(baseUrl, config);
+    const names = await listToolNames(baseUrl, sid, config);
+    assert.ok(!names.includes("get_access_audit"));
+    assert.equal(names.length, TOOL_NAMES.length - 1);
+
+    const seenBefore = mock.seen.length;
+    const called = await proxyPost(
+      baseUrl,
+      { jsonrpc: "2.0", id: 400, method: "tools/call", params: { name: "get_access_audit", arguments: {} } },
+      { config, sessionId: sid, internalKey: INTERNAL_KEY },
+    );
+    const msg = called.messages.find((m) => (m as { id?: unknown }).id === 400) as {
+      error?: unknown;
+      result?: { isError?: boolean };
+    };
+    assert.ok(msg.error !== undefined || msg.result?.isError === true, "disabled tool must not execute");
+    assert.equal(mock.seen.length, seenBefore, "disabled tool must not reach DreamFactory");
   });
 
   await t.test("unknown / evicted Mcp-Session-Id returns 404 Session not found", async () => {

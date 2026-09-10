@@ -5,6 +5,7 @@ import { registerMetaTools } from "./meta";
 import { registerRoleTools } from "./role";
 import { registerAppTools } from "./app";
 import { registerAdminTools } from "./admin";
+import { registerAuditTools } from "./audit";
 import { registerGenericTools } from "./generic";
 
 export type { RegisterToolOptions } from "./define";
@@ -35,6 +36,8 @@ export const TOOL_NAMES = [
   "get_app",
   // admins (1)
   "list_admins",
+  // access audit (1)
+  "get_access_audit",
   // escape hatch (1)
   "call_system_api",
 ] as const;
@@ -52,5 +55,6 @@ export function registerTools(server: McpServer, opts?: RegisterToolOptions): vo
   registerRoleTools(server, opts);
   registerAppTools(server, opts);
   registerAdminTools(server, opts);
+  registerAuditTools(server, opts);
   registerGenericTools(server, opts);
 }

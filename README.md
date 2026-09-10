@@ -129,16 +129,37 @@ call `POST /api/v2/sysmcp/rpc` with a DF session token.
 
 ## Tools
 
-17 tools across six families. See `src/tools/` for full descriptions and zod schemas.
+18 tools across seven families. See `src/tools/` for full descriptions and zod schemas.
+The canonical list is `TOOL_NAMES` in `src/tools/index.ts` (the DreamFactory admin UI mirrors it).
 
 - **Services** (5): `list_services`, `get_service`, `create_service`, `update_service`, `delete_service`
 - **Meta** (3): `list_service_types`, `get_service_type_schema`, `get_environment`
 - **Roles** (4): `list_roles`, `create_role`, `get_role`, `update_role`
 - **Apps / API keys** (3): `list_apps`, `create_app`, `get_app` (keys masked except on `create_app`, see below)
 - **Admins** (1): `list_admins`
+- **Access audit** (1): `get_access_audit` — read-only; last used / last denied per app, role or user,
+  with `never_used`, `stale`, `disabled_but_attempted` and `role_unreferenced` flags. See below.
 - **Escape hatch** (1): `call_system_api` — any `system/*` or `user/*` path the dedicated tools miss.
 
 Any of these can be hidden per DreamFactory service via `disabled_tools` in the service config.
+
+### `get_access_audit`
+
+Wraps `GET /api/v2/system/access_usage`, which **requires df-system 0.7.0 or later** on the
+DreamFactory side. Older versions answer 404; the tool turns that into an error telling the model
+the feature needs an upgrade. A 403 (restricted admin without `system/access_usage` access) becomes
+a permission error.
+
+| Argument | Default | Sent to DreamFactory as |
+| -------- | ------- | ----------------------- |
+| `subject` | `app` | `subject=app\|role\|user` |
+| `stale_days` | `90` | `stale_days` (integer ≥ 1) |
+| `only_flagged` | `false` | not sent. The tool keeps only rows where `never_used`, `stale`, `disabled_but_attempted` or `role_unreferenced` is `true`, and adds `meta.only_flagged` and `meta.unfiltered_count`. |
+| *(always)* | | `include_never_used=true` |
+
+The description tells the model to recommend disabling (`is_active=false`) before deleting, and that
+`never_used` on a fresh install or upgrade only means no traffic has been recorded since tracking
+started (`meta.ledger_available` says whether 30-day request counts are available).
 
 ### API key masking
 

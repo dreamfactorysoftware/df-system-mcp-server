@@ -1,6 +1,6 @@
 /**
  * Smoke test: boot the HTTP server in-process, open an MCP client over the
- * Streamable HTTP transport, ask it to list tools, and assert all 17 of our
+ * Streamable HTTP transport, ask it to list tools, and assert all 18 of our
  * control-plane tools are exposed.
  *
  * Run with: npm test
@@ -52,7 +52,7 @@ async function startServer(): Promise<ChildProcess> {
   return child;
 }
 
-test("MCP server exposes all 17 control-plane tools", async (t) => {
+test("MCP server exposes all 18 control-plane tools", async (t) => {
   const child = await startServer();
   t.after(() => {
     child.kill("SIGTERM");
@@ -63,7 +63,8 @@ test("MCP server exposes all 17 control-plane tools", async (t) => {
   assert.equal(health.status, "healthy");
   assert.equal(health.service, "df-system-mcp");
   assert.equal(health.tools, TOOL_NAMES.length);
-  assert.equal(TOOL_NAMES.length, 17, "expected exactly 17 control-plane tools");
+  assert.equal(health.version, "0.3.0");
+  assert.equal(TOOL_NAMES.length, 18, "expected exactly 18 control-plane tools");
 
   // Connect MCP client over Streamable HTTP and list tools.
   const transport = new StreamableHTTPClientTransport(

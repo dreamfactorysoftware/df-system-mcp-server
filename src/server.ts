@@ -3,7 +3,7 @@ import { registerTools, TOOL_NAMES } from "./tools";
 import type { McpServiceConfig } from "./types";
 
 export const SERVER_NAME = "df-system-mcp";
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.3.0";
 
 let warnedCustomTools = false;
 

@@ -2,7 +2,10 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
-## Unreleased
+## 0.3.0 — 2026-09-10
+
+Adds a usage-audit tool and stops sending app API keys to the LLM. Tool count
+17 → 18; mirror the new name in the admin UI catalogue (`system-mcp-tools.ts`).
 
 ### Security
 - App API keys are no longer sent to the LLM. `list_apps`, `get_app` and
@@ -13,6 +16,19 @@ All notable changes to `df-system-mcp-server` are documented here.
 - `create_app` still returns the real new key, once; its description now says so.
 
 ### Added
+- `get_access_audit` (read-only, `src/tools/audit.ts`): wraps
+  `GET system/access_usage` (df-system 0.7.0+) with `subject` (`app`|`role`|`user`,
+  default `app`), `stale_days` (int ≥ 1, default 90) and `only_flagged`
+  (client-side filter to rows where `never_used`, `stale`,
+  `disabled_but_attempted` or `role_unreferenced` is true; adds
+  `meta.only_flagged` and `meta.unfiltered_count`). Always sends
+  `include_never_used=true`. A 404 becomes a "requires a DreamFactory version
+  that provides system/access_usage (df-system 0.7.0 or later)" tool error; a
+  403 becomes a permission error. The description tells the model to disable
+  before deleting and that "never used" only covers the time since tracking
+  started. It can be hidden with `disabled_tools`.
+- Proxy-contract cases: `get_access_audit` param passthrough, `only_flagged`,
+  argument validation, 404/403 handling, `disabled_tools`.
 - `MCP_EXPOSE_API_KEYS=true` env var disables the masking (default: masked).
 - `tests/redact.test.ts` (unit) and a proxy-contract case covering masking in
   `list_apps`, `get_app`, `call_system_api` and the unmasked `create_app`.
@@ -20,6 +36,9 @@ All notable changes to `df-system-mcp-server` are documented here.
 ### Changed
 - `get_app` / `list_apps` descriptions no longer advertise the `api_key`
   field ("Crucially, the response includes the api_key field…").
+- `TOOL_NAMES` gains `get_access_audit` (between `list_admins` and
+  `call_system_api`); smoke test expects 18 tools.
+- `SERVER_VERSION` and `package.json` bumped to `0.3.0` (reported by `/health`).
 
 ## 0.2.0 — 2026-08-27
 
