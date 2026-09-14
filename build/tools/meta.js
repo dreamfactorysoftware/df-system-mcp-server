@@ -25,7 +25,8 @@ function registerMetaTools(server, opts) {
             auth,
             query: group ? { group } : undefined,
         });
-        return (0, dreamfactory_1.toToolResponse)("list_service_types", result);
+        // Type metadata only (no instance values); masking would corrupt config_schema descriptors.
+        return (0, dreamfactory_1.toToolResponse)("list_service_types", result, { unmasked: true });
     });
     (0, define_1.defineTool)(server, opts, "get_service_type_schema", "Fetch the configuration schema for a single service type (e.g. \"mysql\", \"snowflake\", \"s3\"). " +
         "Returns the type's metadata plus a `config_schema` array describing every field the `config` object " +
@@ -35,7 +36,8 @@ function registerMetaTools(server, opts) {
     }, async ({ name }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
         const result = await (0, dreamfactory_1.dreamFactoryFetch)("GET", `system/service_type/${encodeURIComponent(name)}`, { auth });
-        return (0, dreamfactory_1.toToolResponse)("get_service_type_schema", result);
+        // Type metadata only (no instance values); masking would corrupt config_schema descriptors.
+        return (0, dreamfactory_1.toToolResponse)("get_service_type_schema", result, { unmasked: true });
     });
     (0, define_1.defineTool)(server, opts, "get_environment", "Return the DreamFactory environment summary: platform version, server software, available authentication " +
         "providers, server-side settings, and license details (the license key itself is masked as \"**********\"). " +

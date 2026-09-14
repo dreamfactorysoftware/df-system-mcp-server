@@ -160,9 +160,11 @@ async function dreamFactoryFetch(method, path, opts = {}) {
  */
 function toToolResponse(label, result, options = {}) {
     const mask = { manifest: result.secretFields, keepApiKeys: options.keepApiKeys };
+    // `unmasked`: service type metadata, which has no instance values to protect.
+    const redact = (value) => (options.unmasked ? value : (0, redact_1.maskSecrets)(value, process.env, mask));
     if (result.ok) {
         return {
-            content: [{ type: "text", text: JSON.stringify((0, redact_1.maskSecrets)(result.data, process.env, mask), null, 2) }],
+            content: [{ type: "text", text: JSON.stringify(redact(result.data), null, 2) }],
         };
     }
     const payload = {
@@ -171,7 +173,7 @@ function toToolResponse(label, result, options = {}) {
         operation: label,
     };
     if (result.details !== undefined)
-        payload.details = (0, redact_1.maskSecrets)(result.details, process.env, mask);
+        payload.details = redact(result.details);
     return {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
         isError: true,
