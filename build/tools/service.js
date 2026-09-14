@@ -1,9 +1,43 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.resolveServiceId = resolveServiceId;
 exports.registerServiceTools = registerServiceTools;
 const define_1 = require("./define");
 const zod_1 = require("zod");
 const dreamfactory_1 = require("../dreamfactory");
+/** Service names DreamFactory accepts; anything else can't be a name and is never put into a filter. */
+const SERVICE_NAME = /^[A-Za-z0-9_.-]+$/;
+/**
+ * Resolve an `id_or_name` argument to a numeric service id. DreamFactory's
+ * system/service/{id} only takes ids (a name there is a 404), so a name is
+ * looked up with a `name='...'` filter first.
+ */
+async function resolveServiceId(idOrName, auth) {
+    const value = idOrName.trim();
+    if (/^\d+$/.test(value))
+        return { id: value };
+    if (!SERVICE_NAME.test(value)) {
+        return {
+            failure: {
+                ok: false,
+                status: 400,
+                error: `invalid service id or name '${idOrName}': use the numeric id or the service name (letters, digits, _ . -)`,
+            },
+        };
+    }
+    const found = await (0, dreamfactory_1.dreamFactoryFetch)("GET", "system/service", {
+        auth,
+        query: { filter: `name='${value}'`, fields: "id,name" },
+    });
+    if (!found.ok)
+        return { failure: found };
+    const rows = found.data?.resource ?? [];
+    const id = rows[0]?.id;
+    if (typeof id !== "number" && typeof id !== "string") {
+        return { failure: { ok: false, status: 404, error: `no service named '${value}'` } };
+    }
+    return { id: String(id) };
+}
 /**
  * Register the service-CRUD tool family on the given MCP server.
  *
@@ -49,7 +83,10 @@ function registerServiceTools(server, opts) {
         id_or_name: zod_1.z.string().describe("Numeric id (e.g. \"7\") or service name (e.g. \"mysql-prod\")."),
     }, async ({ id_or_name }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
-        const result = await (0, dreamfactory_1.dreamFactoryFetch)("GET", `system/service/${encodeURIComponent(id_or_name)}`, { auth });
+        const target = await resolveServiceId(id_or_name, auth);
+        if ("failure" in target)
+            return (0, dreamfactory_1.toToolResponse)("get_service", target.failure);
+        const result = await (0, dreamfactory_1.dreamFactoryFetch)("GET", `system/service/${target.id}`, { auth });
         return (0, dreamfactory_1.toToolResponse)("get_service", result);
     });
     (0, define_1.defineTool)(server, opts, "create_service", "Create a new DreamFactory service (database connector, file storage, email, script, etc). " +
@@ -104,7 +141,10 @@ function registerServiceTools(server, opts) {
             .describe("Partial service object — only fields you want to change. May include nested `config`."),
     }, async ({ id_or_name, patch }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
-        const result = await (0, dreamfactory_1.dreamFactoryFetch)("PATCH", `system/service/${encodeURIComponent(id_or_name)}`, { auth, body: patch });
+        const target = await resolveServiceId(id_or_name, auth);
+        if ("failure" in target)
+            return (0, dreamfactory_1.toToolResponse)("update_service", target.failure);
+        const result = await (0, dreamfactory_1.dreamFactoryFetch)("PATCH", `system/service/${target.id}`, { auth, body: patch });
         return (0, dreamfactory_1.toToolResponse)("update_service", result);
     });
     (0, define_1.defineTool)(server, opts, "delete_service", "Permanently delete a DreamFactory service. This unregisters the connector and removes the /api/v2/{name}/ " +
@@ -113,7 +153,10 @@ function registerServiceTools(server, opts) {
         id_or_name: zod_1.z.string().describe("Numeric id or service name to delete."),
     }, async ({ id_or_name }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
-        const result = await (0, dreamfactory_1.dreamFactoryFetch)("DELETE", `system/service/${encodeURIComponent(id_or_name)}`, { auth });
+        const target = await resolveServiceId(id_or_name, auth);
+        if ("failure" in target)
+            return (0, dreamfactory_1.toToolResponse)("delete_service", target.failure);
+        const result = await (0, dreamfactory_1.dreamFactoryFetch)("DELETE", `system/service/${target.id}`, { auth });
         return (0, dreamfactory_1.toToolResponse)("delete_service", result);
     });
 }
