@@ -2,6 +2,27 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
+## 0.4.1 — 2026-09-14
+
+### Security
+- Tool results no longer carry secrets beyond app API keys. `get_environment`
+  and `call_system_api system/environment` returned the platform
+  `license_key`, and service configs returned credentials DreamFactory doesn't
+  mask (an MCP service's `oauth_client_secret`, SMTP and AD passwords, cloud
+  email keys). Every tool response now replaces properties whose names look
+  like secrets (passwords, passphrases, secrets, tokens, private keys,
+  license/app/encryption keys, credentials, connection strings, DSNs, and
+  `key`) with DreamFactory's protection mask `**********`, at any depth, and
+  masks `value` on records with `private: true` (private lookups). Null,
+  numbers and booleans pass through. `api_key` keeps its `api_key_hint`
+  masking, and `create_app` still returns the new key.
+- Write requests drop properties whose value is exactly `**********`, so
+  sending back a config read through this server leaves the stored secret
+  unchanged.
+
+### Added
+- `MCP_EXPOSE_SECRETS=true` turns secret masking off.
+
 ## 0.4.0 — 2026-09-14
 
 Runs as a daemon on the DreamFactory host, not only as a sidecar container.

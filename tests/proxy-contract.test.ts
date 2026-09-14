@@ -28,6 +28,22 @@ const TRACE_ID = "trace-123";
 const APP_KEY_A = "36fda24fe5588fa4285ac6c6c2fdfbdb6b6bc9834699774c9bf777f706d05a88";
 const APP_KEY_B = "b1946ac92492d2347c6235b4d2611184d8e7a1c1c3f0e0b4a1e2f3c4d5e6f7a9";
 const NEW_APP_KEY = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/** Secrets the mock DreamFactory returns; none may reach the MCP client, and the mask must never be written back. */
+const LICENSE_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6";
+const DB_PASSWORD = "Reporting-Db-Pass-9f8e7d";
+const MCP_OAUTH_SECRET = "5ec2e7a4b1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4";
+const PRIVATE_KEY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7mockprivatekey";
+const PRIVATE_LOOKUP_VALUE = "lookup-secret-42";
+const SERVICE_7_CONFIG = {
+  host: "smtp.example.com",
+  port: 587,
+  username: "mailer",
+  password: DB_PASSWORD,
+  oauth_client_secret: MCP_OAUTH_SECRET,
+  private_key: PRIVATE_KEY,
+  token_endpoint: "https://login.example.com/oauth2/token",
+  password_required: true,
+};
 
 interface SeenRequest {
   method: string;
@@ -151,10 +167,42 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
             app_by_role_id: [{ id: 4, name: "reporting_app", api_key: APP_KEY_A }],
           }),
         );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/environment")) {
+        res.end(
+          JSON.stringify({
+            platform: { version: "7.7.0", license: "GOLD", license_key: LICENSE_KEY },
+            server: { host_os: "linux" },
+          }),
+        );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/7")) {
+        res.end(JSON.stringify({ id: 7, name: "mail", type: "smtp_email", config: SERVICE_7_CONFIG }));
+      } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/7")) {
+        // Echo like DreamFactory: the stored secrets come back alongside the patched fields.
+        const patch = JSON.parse(body || "{}");
+        res.end(
+          JSON.stringify({ id: 7, name: "mail", ...patch, config: { ...SERVICE_7_CONFIG, ...(patch.config ?? {}) } }),
+        );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/lookup")) {
+        res.end(
+          JSON.stringify({
+            resource: [
+              { id: 1, name: "db_pass", value: PRIVATE_LOOKUP_VALUE, private: true },
+              { id: 2, name: "region", value: "us-east-1", private: false },
+            ],
+          }),
+        );
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/service")) {
         res.end(
           JSON.stringify({
-            resource: [{ id: 1, name: "mysql-prod", type: "mysql", is_active: true }],
+            resource: [
+              {
+                id: 1,
+                name: "mysql-prod",
+                type: "mysql",
+                is_active: true,
+                config: { host: "db.internal", username: "reporting", password: DB_PASSWORD },
+              },
+            ],
             meta: { count: 1 },
           }),
         );
@@ -526,6 +574,75 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
 
     const createText = await call(24, "create_app", { name: "NewApp", role_id: 2 });
     assert.equal(JSON.parse(createText).resource[0].api_key, NEW_APP_KEY, "create_app must return the real new key");
+  });
+
+  await t.test("secrets are masked in every tool response; the mask is never written back", async () => {
+    const sid = await openSession(baseUrl);
+    let id = 400;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const rid = ++id;
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id: rid, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, rid);
+      assert.notEqual(result.isError, true, `${name}: ${JSON.stringify(result)}`);
+      return (result.content as { text: string }[])[0].text;
+    };
+    const noSecrets = (text: string, label: string) => {
+      for (const s of [LICENSE_KEY, DB_PASSWORD, MCP_OAUTH_SECRET, PRIVATE_KEY, PRIVATE_LOOKUP_VALUE]) {
+        assert.ok(!text.includes(s), `${label} leaked a secret`);
+      }
+    };
+
+    const envText = await call("get_environment", {});
+    noSecrets(envText, "get_environment");
+    const env = JSON.parse(envText);
+    assert.equal(env.platform.license_key, "**********");
+    assert.equal(env.platform.license, "GOLD", "non-secret license details stay readable");
+    noSecrets(await call("call_system_api", { method: "GET", path: "system/environment" }), "call_system_api environment");
+    noSecrets(await call("list_services", {}), "list_services");
+
+    const svcText = await call("get_service", { id_or_name: "7" });
+    noSecrets(svcText, "get_service");
+    const svc = JSON.parse(svcText);
+    assert.deepEqual(svc.config, {
+      host: "smtp.example.com",
+      port: 587,
+      username: "mailer",
+      password: "**********",
+      oauth_client_secret: "**********",
+      private_key: "**********",
+      token_endpoint: "https://login.example.com/oauth2/token",
+      password_required: true,
+    });
+
+    const lookupText = await call("call_system_api", { method: "GET", path: "system/lookup" });
+    noSecrets(lookupText, "call_system_api lookup");
+    assert.deepEqual(
+      JSON.parse(lookupText).resource.map((l: { name: string; value: unknown }) => [l.name, l.value]),
+      [
+        ["db_pass", "**********"],
+        ["region", "us-east-1"],
+      ],
+    );
+
+    // Round trip: the model sends the masked config back with one real change.
+    const seenBefore = mock.seen.length;
+    const updated = await call("update_service", {
+      id_or_name: "7",
+      patch: { label: "Mail", config: { ...svc.config, host: "smtp2.example.com" } },
+    });
+    noSecrets(updated, "update_service response");
+    const sent = mock.seen[seenBefore];
+    assert.equal(sent.method, "PATCH");
+    assert.ok(!sent.body.includes("**********"), `masked values must not be sent to DreamFactory: ${sent.body}`);
+    const sentBody = JSON.parse(sent.body);
+    assert.equal(sentBody.config.host, "smtp2.example.com");
+    assert.equal(sentBody.config.password_required, true);
+    assert.equal("password" in sentBody.config, false);
+    assert.equal("oauth_client_secret" in sentBody.config, false);
   });
 
   await t.test("get_access_audit: param passthrough, only_flagged, validation, 404/403", async () => {

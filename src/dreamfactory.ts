@@ -1,3 +1,4 @@
+import { maskSecrets, stripMaskedSecrets } from "./redact";
 import type {
   AuthContext,
   DreamFactoryFetchOptions,
@@ -63,6 +64,7 @@ function buildQuery(query?: Record<string, string | number | boolean | undefined
  * - Forwards X-DreamFactory-API-Key / X-DreamFactory-Trace-Id when bound.
  * - Uses the per-session base URL (X-Mcp-Base-Url) when present, else DREAMFACTORY_URL.
  * - Sets Accept: application/json (and Content-Type when a body is present).
+ * - Drops masked secrets ("**********") from the body so they never overwrite real ones.
  * - Never logs the session token.
  * - Returns a uniform { ok, status, data | error } envelope.
  */
@@ -97,7 +99,7 @@ export async function dreamFactoryFetch(
   let bodyInit: string | undefined;
   if (opts.body !== undefined && opts.body !== null) {
     headers["Content-Type"] = "application/json";
-    bodyInit = JSON.stringify(opts.body);
+    bodyInit = JSON.stringify(stripMaskedSecrets(opts.body));
   }
 
   try {
@@ -142,11 +144,13 @@ export async function dreamFactoryFetch(
 /**
  * Convert a DreamFactoryResult into the MCP tool text response shape.
  * Caller should pass a label that describes the operation for error context.
+ * Every tool response passes through here, so secret masking (src/redact.ts)
+ * is applied centrally; API-key masking stays with the tools that return apps.
  */
 export function toToolResponse(label: string, result: DreamFactoryResult): ToolTextResponse {
   if (result.ok) {
     return {
-      content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(maskSecrets(result.data), null, 2) }],
     };
   }
   const payload: Record<string, unknown> = {
@@ -154,7 +158,7 @@ export function toToolResponse(label: string, result: DreamFactoryResult): ToolT
     status: result.status,
     operation: label,
   };
-  if (result.details !== undefined) payload.details = result.details;
+  if (result.details !== undefined) payload.details = maskSecrets(result.details);
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     isError: true,

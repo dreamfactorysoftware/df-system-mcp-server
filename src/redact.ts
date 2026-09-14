@@ -1,21 +1,36 @@
 /**
- * API-key redaction for tool responses.
+ * Redaction for tool responses.
  *
  * Every tool result is handed to an LLM, which means it lands in provider logs
- * and in DreamFactory's own prompt logs. App API keys are live credentials, so
- * responses that can carry them are masked before they leave this process.
+ * and in DreamFactory's own prompt logs. Two layers keep live credentials out:
  *
- * Masked shape (applied to every object property named `api_key`, at any depth,
- * inside arrays and `{ resource: [...] }` wrappers alike):
+ * 1. API keys (`maskApiKeys`, applied by the tools that return apps). Every
+ *    object property named `api_key`, at any depth, is masked as
  *
- *   { "api_key": null, "api_key_hint": "…5a88" }
+ *      { "api_key": null, "api_key_hint": "…5a88" }
  *
- * i.e. `api_key` becomes `null` and a sibling `api_key_hint` is added holding
- * "…" followed by the key's last 4 characters. Keys shorter than
- * MIN_HINT_KEY_LENGTH get a bare "…" hint so a short key is never disclosed
- * in full. A null / empty / non-string `api_key` yields `api_key_hint: null`.
+ *    i.e. `api_key` becomes `null` and a sibling `api_key_hint` holds "…" plus
+ *    the key's last 4 characters. Keys shorter than MIN_HINT_KEY_LENGTH get a
+ *    bare "…" hint so a short key is never disclosed in full. A null / empty /
+ *    non-string `api_key` yields `api_key_hint: null`. `create_app` skips this
+ *    layer so the caller can see the key it just minted.
+ *    Set `MCP_EXPOSE_API_KEYS=true` to disable (not recommended).
  *
- * Set `MCP_EXPOSE_API_KEYS=true` to disable masking (not recommended).
+ * 2. Other secrets (`maskSecrets`, applied to EVERY tool response). DreamFactory
+ *    returns more than API keys: `system/environment` includes the platform
+ *    `license_key`, and service configs include credentials the config model
+ *    doesn't mark protected (SMTP and AD passwords, the MCP service's
+ *    `oauth_client_secret`, cloud email keys). Any property whose name looks
+ *    like a secret (see `isSecretKey`) is replaced with DreamFactory's own
+ *    protection mask `**********`, and so is `value` on records flagged
+ *    `private: true` (private lookups). Only non-empty strings, objects and
+ *    arrays are replaced; null, numbers and booleans pass through.
+ *    Set `MCP_EXPOSE_SECRETS=true` to disable (not recommended).
+ *
+ * The mask is never written back: `stripMaskedSecrets` drops properties whose
+ * value is exactly `**********` from request bodies, so sending back a config
+ * read through this server leaves the stored secret unchanged. DreamFactory only
+ * ignores the mask itself for fields its models protect.
  */
 import type { DreamFactoryResult } from "./types";
 
@@ -29,11 +44,22 @@ export const HINT_CHARS = 4;
 export const MIN_HINT_KEY_LENGTH = 16;
 /** Prefix marking a hint as a truncated key. */
 export const HINT_PREFIX = "…";
+/** DreamFactory's protection mask (df-core Protectable::$protectionMask). */
+export const SECRET_MASK = "**********";
 
-/** True when `MCP_EXPOSE_API_KEYS` opts out of masking. Read per call. */
-export function apiKeysExposed(env: NodeJS.ProcessEnv = process.env): boolean {
-  const v = (env.MCP_EXPOSE_API_KEYS ?? "").trim().toLowerCase();
+function flagSet(value: string | undefined): boolean {
+  const v = (value ?? "").trim().toLowerCase();
   return v === "true" || v === "1" || v === "yes";
+}
+
+/** True when `MCP_EXPOSE_API_KEYS` opts out of API-key masking. Read per call. */
+export function apiKeysExposed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return flagSet(env.MCP_EXPOSE_API_KEYS);
+}
+
+/** True when `MCP_EXPOSE_SECRETS` opts out of secret masking. Read per call. */
+export function secretsExposed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return flagSet(env.MCP_EXPOSE_SECRETS);
 }
 
 /** The non-reversible hint for one key value. */
@@ -74,4 +100,75 @@ export function maskResult(result: DreamFactoryResult, env: NodeJS.ProcessEnv = 
   if (result.ok) return { ...result, data: maskApiKeys(result.data, env) };
   if (result.details === undefined) return result;
   return { ...result, details: maskApiKeys(result.details, env) };
+}
+
+/** Name segments that mark a secret, matched on the snake_case form of a property name. */
+const SECRET_NAME =
+  /(^|_)(pass|passwd|password|passphrase|pwd|secret|private_key|api_key|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|credential|credentials|connection_string|dsn)($|_)/;
+/** Suffixes that describe a secret rather than hold one (token_endpoint, password_policy, secret_type, ...). */
+const DESCRIPTIVE_SUFFIX =
+  /_(url|uri|endpoint|ttl|timeout|expires|expire|expiry|expiration|lifetime|length|size|hint|type|name|names|field|fields|header|headers|param|params|policy|required|enabled|disabled|mode|label|description|format|id|ids|count|at|date|time|path|location|method|prefix)$/;
+
+function snakeCase(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[-\s.]+/g, "_")
+    .toLowerCase();
+}
+
+/** True when a property name looks like it holds a secret. `api_key` has its own masking. */
+export function isSecretKey(name: string): boolean {
+  const n = snakeCase(name);
+  if (n === API_KEY_FIELD || n === HINT_FIELD) return false;
+  if (DESCRIPTIVE_SUFFIX.test(n)) return false;
+  return n === "key" || SECRET_NAME.test(n);
+}
+
+function hasSecretValue(v: unknown): boolean {
+  if (typeof v === "string") return v.length > 0 && v !== SECRET_MASK;
+  return v !== null && typeof v === "object";
+}
+
+function isPrivateRecord(src: Record<string, unknown>): boolean {
+  const p = src.private;
+  return p === true || p === 1 || p === "1" || p === "true";
+}
+
+function maskSecretsIn(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskSecretsIn);
+  if (value === null || typeof value !== "object") return value;
+  const src = value as Record<string, unknown>;
+  const privateRecord = isPrivateRecord(src);
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(src)) {
+    const secret = isSecretKey(k) || (privateRecord && k === "value");
+    out[k] = secret && hasSecretValue(v) ? SECRET_MASK : maskSecretsIn(v);
+  }
+  return out;
+}
+
+/**
+ * Return a copy of `value` with secret-looking properties replaced by
+ * SECRET_MASK (see module doc). The input is never mutated. Returns `value`
+ * untouched when masking is disabled via `MCP_EXPOSE_SECRETS`.
+ */
+export function maskSecrets<T>(value: T, env: NodeJS.ProcessEnv = process.env): T {
+  if (secretsExposed(env)) return value;
+  return maskSecretsIn(value) as T;
+}
+
+/**
+ * Return a copy of a request body without properties whose value is exactly
+ * SECRET_MASK, at any depth, so a masked secret is never written back over
+ * the real one. Array elements are kept as they are.
+ */
+export function stripMaskedSecrets<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(stripMaskedSecrets) as T;
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === SECRET_MASK) continue;
+    out[k] = stripMaskedSecrets(v);
+  }
+  return out as T;
 }

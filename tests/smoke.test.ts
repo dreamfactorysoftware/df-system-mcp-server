@@ -129,7 +129,7 @@ test("MCP server exposes all 18 control-plane tools", async (t) => {
   assert.equal(health.status, "healthy");
   assert.equal(health.service, "df-system-mcp");
   assert.equal(health.tools, TOOL_NAMES.length);
-  assert.equal(health.version, "0.4.0");
+  assert.equal(health.version, "0.4.1");
   assert.equal(health.listen, `127.0.0.1:${PORTS.smoke}`);
   assert.equal(health.loopback_trust, true);
   assert.equal(TOOL_NAMES.length, 18, "expected exactly 18 control-plane tools");

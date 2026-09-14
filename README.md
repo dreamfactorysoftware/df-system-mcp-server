@@ -97,7 +97,8 @@ of that token — non-admin tokens cannot administer the instance. Tokens and ke
 | `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
 | `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). Requests with an evicted id get `404 Session not found`. |
 | `MCP_ALLOWED_BASE_URLS` | *(unset)*         | Comma-separated extra origins that untrusted callers may name in `X-Mcp-Base-Url` (the `DREAMFACTORY_URL` origin is always allowed). Not needed when `MCP_INTERNAL_KEY` is set. |
-| `MCP_EXPOSE_API_KEYS` | `false`             | `true` disables API-key masking in `list_apps`, `get_app` and `call_system_api`, so full keys are sent to the LLM. Leave unset in production; see [API key masking](#api-key-masking). |
+| `MCP_EXPOSE_API_KEYS` | `false`             | `true` disables API-key masking in `list_apps`, `get_app` and `call_system_api`, so full keys are sent to the LLM. Leave unset in production; see [Secret masking](#secret-masking). |
+| `MCP_EXPOSE_SECRETS`  | `false`             | `true` disables masking of other secrets (license key, passwords, client secrets, tokens, private lookups) in every tool response. Leave unset in production; see [Secret masking](#secret-masking). |
 
 ### Trust boundary
 
@@ -169,10 +170,29 @@ recorded activity; `null` when nothing has been recorded yet). `last_service` / 
 the last use (any request not rejected with 401/403); a 401/403 only moves `last_denied_at`.
 `meta.ledger_available` says whether `requests_30d` / `top_services` are populated.
 
-### API key masking
+### Secret masking
 
-Tool results go to an LLM, and from there into provider logs and DreamFactory's prompt logs, so app
-API keys are masked by default. In every `list_apps`, `get_app` and `call_system_api` response,
+Tool results go to an LLM, and from there into provider logs and DreamFactory's prompt logs, so
+credentials are masked by default.
+
+**Secrets in every response.** DreamFactory returns more than API keys: `system/environment` includes
+the platform `license_key`, and service configs include credentials that DreamFactory itself doesn't
+mask (for example SMTP and Active Directory passwords, or an MCP service's `oauth_client_secret`).
+Every tool response replaces properties whose names look like secrets with DreamFactory's own
+protection mask, `"**********"`, at any depth:
+
+- names containing `password`, `passphrase`, `secret`, `token`, `private_key`, `license_key`,
+  `app_key`, `encryption_key`, `credentials`, `connection_string` or `dsn`, and a property named
+  exactly `key` (camelCase names count too, e.g. `clientSecret`)
+- except descriptive names such as `token_endpoint`, `token_ttl`, `password_policy` or `secret_type`
+- `value` on records with `private: true` (private lookups)
+- only non-empty strings, objects and arrays are replaced; `null`, numbers and booleans pass through
+
+Write requests drop any property whose value is exactly `"**********"`, so sending back a config read
+through this server leaves the stored secret unchanged. To rotate a credential, send the new value.
+Set `MCP_EXPOSE_SECRETS=true` to turn this masking off.
+
+**App API keys.** In every `list_apps`, `get_app` and `call_system_api` response,
 each object property named `api_key`, at any depth (single records, `{ resource: [...] }` lists,
 records nested via `related=` such as `app_by_role_id`), is rewritten as:
 
@@ -183,7 +203,7 @@ records nested via `related=` such as `app_by_role_id`), is rewritten as:
 - `api_key_hint` is `"…"` plus the key's last 4 characters. Keys shorter than 16 characters get a
   bare `"…"`; a null or empty key gets `api_key_hint: null`.
 - `create_app` is the exception: it returns the real new key once, because the caller needs it.
-- Set `MCP_EXPOSE_API_KEYS=true` to turn masking off.
+- Set `MCP_EXPOSE_API_KEYS=true` to turn API-key masking off.
 
 ## Development
 
