@@ -97,7 +97,7 @@ of that token — non-admin tokens cannot administer the instance. Tokens and ke
 | `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
 | `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). Requests with an evicted id get `404 Session not found`. |
 | `MCP_ALLOWED_BASE_URLS` | *(unset)*         | Comma-separated extra origins that untrusted callers may name in `X-Mcp-Base-Url` (the `DREAMFACTORY_URL` origin is always allowed). Not needed when `MCP_INTERNAL_KEY` is set. |
-| `MCP_EXPOSE_API_KEYS` | `false`             | `true` disables API-key masking in `list_apps`, `get_app` and `call_system_api`, so full keys are sent to the LLM. Leave unset in production; see [Secret masking](#secret-masking). |
+| `MCP_EXPOSE_API_KEYS` | `false`             | `true` disables API-key masking (app keys in `list_apps`, `get_app` and `call_system_api`, and `api_key` in service configs), so full keys are sent to the LLM. Leave unset in production; see [Secret masking](#secret-masking). |
 | `MCP_EXPOSE_SECRETS`  | `false`             | `true` disables masking of other secrets (license key, passwords, client secrets, tokens, private lookups) in every tool response. Leave unset in production; see [Secret masking](#secret-masking). |
 
 ### Trust boundary
@@ -181,9 +181,9 @@ mask (for example SMTP and Active Directory passwords, or an MCP service's `oaut
 Every tool response replaces properties whose names look like secrets with DreamFactory's own
 protection mask, `"**********"`, at any depth:
 
-- names containing `password`, `passphrase`, `secret`, `token`, `private_key`, `license_key`,
-  `app_key`, `encryption_key`, `credentials`, `connection_string` or `dsn`, and a property named
-  exactly `key` (camelCase names count too, e.g. `clientSecret`)
+- names containing `password`, `passphrase`, `passcode`, `secret`, `token`, `private_key`, `api_key`,
+  `license_key`, `app_key`, `encryption_key`, `credentials`, `connection_string` or `dsn` (plurals
+  too), and a property named exactly `key` (camelCase names count too, e.g. `clientSecret`)
 - except descriptive names such as `token_endpoint`, `token_ttl`, `password_policy` or `secret_type`
 - `value` on any record whose `name` looks like a credential: Authorization, Proxy-Authorization,
   Cookie, Set-Cookie, X-API-Key, or a name containing `auth`, `token`, `secret`, `pass`, `key`,
@@ -196,6 +196,21 @@ protection mask, `"**********"`, at any depth:
   and credential lines in HTTPHEADER / PROXYHEADER (`"Authorization: **********"`)
 - a password inside any URL, in place: `http://user:**********@proxy:3128`
 - only non-empty strings, objects and arrays are replaced; `null`, numbers and booleans pass through
+
+**Type-aware fields.** Names don't reveal every credential (a push service's `certificate`, say), so
+df-mcp-server also sends the daemon each installed service type's secret config fields, built from
+DreamFactory's model metadata: fields the type encrypts or protects, and fields its config schema
+types as a password or certificate (`username` and `account_name` stay readable). They arrive in the
+proxy envelope as `_mcpSecretFields`:
+
+```json
+{ "gcm": { "secret": ["api_key", "certificate"], "maps": [] }, "nodejs": { "secret": [], "maps": ["config"] } }
+```
+
+On any record with that `type`, the `secret` fields of its `config` are masked. Keys of `maps` fields
+(user-named key/value maps such as a script service's `config`) are masked when they look like
+credentials (`STRIPE_KEY`, `DB_PASSWORD`). The list only adds masking; a client connecting to the
+daemon directly, without df-mcp-server, gets the name rules above.
 
 Write requests drop a property set to exactly `"**********"` directly on the body or directly in
 `config`, so sending back a config read through this server leaves the stored secret unchanged. A mask
@@ -216,6 +231,7 @@ records nested via `related=` such as `app_by_role_id`), is rewritten as:
 - `api_key_hint` is `"…"` plus the key's last 4 characters. Keys shorter than 16 characters get a
   bare `"…"`; a null or empty key gets `api_key_hint: null`.
 - `create_app` is the exception: it returns the real new key once, because the caller needs it.
+- `api_key` anywhere else (service configs such as gcm or rackspace) gets the secret mask `"**********"`.
 - Set `MCP_EXPOSE_API_KEYS=true` to turn API-key masking off.
 
 ## Development

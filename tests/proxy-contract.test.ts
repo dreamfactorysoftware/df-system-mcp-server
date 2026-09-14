@@ -49,6 +49,9 @@ const SERVICE_24_CONFIG = {
     { id: 11, service_id: 24, name: "api_key", value: RWS_PARAM_KEY, exclude: false, outbound: true, cache_key: false, action: 1 },
   ],
 };
+const GCM_API_KEY = "AIzaSyMockGcmServerKey0123456789abcdef";
+const GCM_CERTIFICATE = "-----BEGIN PRIVATE KEY-----MIIEmockcertificatecontent";
+const SCRIPT_STRIPE_KEY = "sk_live_mock_stripe_0123456789";
 const SERVICE_7_CONFIG = {
   host: "smtp.example.com",
   port: 587,
@@ -208,6 +211,24 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
           { id: 24, name: "rest-api" },
         ];
         res.end(JSON.stringify({ resource: services.filter((s) => s.name === wanted) }));
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/31")) {
+        res.end(
+          JSON.stringify({
+            id: 31,
+            name: "push",
+            type: "gcm",
+            config: { api_key: GCM_API_KEY, certificate: GCM_CERTIFICATE, sender_id: "123456789" },
+          }),
+        );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/32")) {
+        res.end(
+          JSON.stringify({
+            id: 32,
+            name: "billing-script",
+            type: "nodejs",
+            config: { content: "return event;", config: { STRIPE_KEY: SCRIPT_STRIPE_KEY, REGION: "us-east-1" } },
+          }),
+        );
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/7")) {
         res.end(JSON.stringify({ id: 7, name: "mail", type: "smtp_email", config: SERVICE_7_CONFIG }));
       } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/7")) {
@@ -318,6 +339,8 @@ async function proxyPost(
     sessionId?: string;
     internalKey?: string;
     extraHeaders?: Record<string, string>;
+    /** Sent as `_mcpSecretFields`, as df-mcp-server does for system_mcp services. */
+    secretFields?: unknown;
   } = {},
 ): Promise<{ status: number; sessionId: string | null; messages: unknown[] }> {
   const headers: Record<string, string> = {
@@ -338,6 +361,7 @@ async function proxyPost(
       _mcpPayload: payload,
       _mcpConfig: opts.config ?? {},
       _mcpAvailableServices: [],
+      ...(opts.secretFields !== undefined ? { _mcpSecretFields: opts.secretFields } : {}),
     }),
   });
   const text = await res.text();
@@ -372,8 +396,9 @@ async function openSession(
   baseUrl: string,
   config: Record<string, unknown> = {},
   extraHeaders: Record<string, string> = {},
+  secretFields?: unknown,
 ): Promise<string> {
-  const init = await proxyPost(baseUrl, initialize, { config, internalKey: INTERNAL_KEY, extraHeaders });
+  const init = await proxyPost(baseUrl, initialize, { config, internalKey: INTERNAL_KEY, extraHeaders, secretFields });
   assert.equal(init.status, 200, "initialize via envelope must succeed");
   const sid = init.sessionId;
   assert.ok(sid, "Mcp-Session-Id must be returned on initialize");
@@ -755,6 +780,41 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal(mock.seen.length, seenBefore + 1);
     assert.equal(mock.seen[seenBefore].method, "PATCH");
     noRwsSecrets(ok.text, "update_service rws response");
+  });
+
+  await t.test("secret-field manifest from the envelope masks type-specific fields for the whole session", async () => {
+    const callIn = async (sid: string, id: number, name: string, args: Record<string, unknown>) => {
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, id);
+      assert.notEqual(result.isError, true, `${name}: ${JSON.stringify(result)}`);
+      return JSON.parse((result.content as { text: string }[])[0].text);
+    };
+
+    // Without a manifest only the name rules apply: api_key is caught, a certificate or a
+    // user-named script config key is not.
+    const plain = await openSession(baseUrl);
+    const gcmPlain = await callIn(plain, 700, "get_service", { id_or_name: "31" });
+    assert.equal(gcmPlain.config.api_key, "**********", "api_key in a service config is masked by name");
+    assert.equal(gcmPlain.config.certificate, GCM_CERTIFICATE);
+    const scriptPlain = await callIn(plain, 701, "get_service", { id_or_name: "32" });
+    assert.equal(scriptPlain.config.config.STRIPE_KEY, SCRIPT_STRIPE_KEY);
+
+    // With the manifest, sent once at initialize: tool calls in that session mask the type-specific fields.
+    const manifest = { gcm: { secret: ["api_key", "certificate"], maps: [] }, nodejs: { secret: [], maps: ["config"] } };
+    const masked = await openSession(baseUrl, {}, {}, manifest);
+    const gcm = await callIn(masked, 702, "get_service", { id_or_name: "31" });
+    assert.deepEqual(gcm.config, { api_key: "**********", certificate: "**********", sender_id: "123456789" });
+    const script = await callIn(masked, 703, "get_service", { id_or_name: "32" });
+    assert.deepEqual(script.config, { content: "return event;", config: { STRIPE_KEY: "**********", REGION: "us-east-1" } });
+
+    // A malformed manifest is ignored, never weakens masking.
+    const junk = await openSession(baseUrl, {}, {}, { gcm: { secret: "certificate" }, x: 5 });
+    const gcmJunk = await callIn(junk, 704, "get_service", { id_or_name: "31" });
+    assert.equal(gcmJunk.config.api_key, "**********");
   });
 
   await t.test("service tools accept a name: resolved to the id with a filter first", async () => {

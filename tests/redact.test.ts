@@ -12,6 +12,7 @@ import {
   maskApiKeys,
   maskResult,
   maskSecrets,
+  parseSecretFieldManifest,
   SECRET_MASK,
   secretsExposed,
   stripMaskedSecrets,
@@ -114,11 +115,11 @@ test("isSecretKey: secret-looking names, including camelCase", () => {
     "oauth_client_secret", "clientSecret", "aws_secret_access_key", "private_key", "privateKey", "license_key",
     "app_key", "encryption_key", "token", "access_token", "refresh_token", "session_token", "credentials",
     "connection_string", "dsn", "key", "openai_api_key", "Authorization", "Proxy-Authorization", "Cookie",
-    "Set-Cookie", "X-Api-Key", "auth",
+    "Set-Cookie", "X-Api-Key", "auth", "api_key", "api_keys", "data_chat_api_keys", "passcode", "tokens",
   ];
   for (const k of secret) assert.equal(isSecretKey(k), true, k);
   const notSecret = [
-    "api_key", "api_key_hint", "token_endpoint", "token_ttl", "session_token_ttl", "password_policy",
+    "api_key_hint", "token_endpoint", "token_ttl", "session_token_ttl", "password_policy",
     "password_required", "secret_type", "oauth_client_id", "username", "host", "name", "keyboard", "monkey",
     "key_name", "primary_key", "license", "author", "auth_type", "Accept",
   ];
@@ -172,23 +173,66 @@ test("maskSecrets: environment license_key, service config credentials, nested a
   assert.equal(input.platform.license_key, LICENSE, "input must not be mutated");
 });
 
-test("maskSecrets: private lookup values, api_key left to maskApiKeys", () => {
-  const out = maskSecrets(
-    {
-      resource: [
-        { name: "db_pass", value: "p@ss", private: true },
-        { name: "region", value: "us-east-1", private: false },
-      ],
-      app: { api_key: KEY },
-    },
-    {},
-  );
-  assert.deepEqual(out, {
+test("maskSecrets: private lookup values; api_key masked unless keepApiKeys; hints untouched", () => {
+  const input = {
+    resource: [
+      { name: "db_pass", value: "p@ss", private: true },
+      { name: "region", value: "us-east-1", private: false },
+    ],
+    service: { type: "gcm", config: { api_key: KEY, sender_id: "123" } },
+    app: { api_key: null, api_key_hint: "…5a88" },
+  };
+  assert.deepEqual(maskSecrets(input, {}), {
     resource: [
       { name: "db_pass", value: SECRET_MASK, private: true },
       { name: "region", value: "us-east-1", private: false },
     ],
-    app: { api_key: KEY },
+    service: { type: "gcm", config: { api_key: SECRET_MASK, sender_id: "123" } },
+    app: { api_key: null, api_key_hint: "…5a88" },
+  });
+  const created = maskSecrets({ resource: [{ id: 6, api_key: KEY, secret: "s" }] }, {}, { keepApiKeys: true });
+  assert.deepEqual(created, { resource: [{ id: 6, api_key: KEY, secret: SECRET_MASK }] }, "create_app keeps only the key");
+});
+
+test("maskSecrets with a manifest: type-specific secret fields and user-named maps", () => {
+  const manifest = parseSecretFieldManifest({
+    gcm: { secret: ["api_key", "certificate"], maps: [] },
+    snowflake: { secret: ["key", "passcode", "password"], maps: [] },
+    nodejs: { secret: [], maps: ["config"] },
+  });
+  const records = {
+    resource: [
+      { id: 31, type: "gcm", config: { api_key: KEY, certificate: "-----BEGIN PRIVATE KEY-----x", sender_id: "123" } },
+      { id: 40, type: "snowflake", config: { username: "etl", passcode: "123456", key: "pem", role: "ETL" } },
+      { id: 32, type: "nodejs", config: { content: "return 1", config: { STRIPE_KEY: "sk_live_x", REGION: "us" } } },
+      { id: 50, type: "mysql", config: { host: "db", certificate: "public" } },
+    ],
+  };
+  const out = maskSecrets(records, {}, { manifest }) as typeof records;
+  assert.deepEqual(out.resource[0].config, { api_key: SECRET_MASK, certificate: SECRET_MASK, sender_id: "123" });
+  assert.deepEqual(out.resource[1].config, { username: "etl", passcode: SECRET_MASK, key: SECRET_MASK, role: "ETL" });
+  assert.deepEqual(out.resource[2].config, { content: "return 1", config: { STRIPE_KEY: SECRET_MASK, REGION: "us" } });
+  assert.deepEqual(out.resource[3].config, { host: "db", certificate: "public" }, "types outside the manifest keep name rules only");
+
+  // Without the manifest, the name rules can't know these fields.
+  const plain = maskSecrets(records, {}) as typeof records;
+  assert.equal(plain.resource[0].config.certificate, "-----BEGIN PRIVATE KEY-----x");
+  assert.equal((plain.resource[2].config.config as Record<string, string>).STRIPE_KEY, "sk_live_x");
+});
+
+test("parseSecretFieldManifest: keeps valid entries, drops junk, can't reach the prototype", () => {
+  assert.equal(parseSecretFieldManifest(null), undefined);
+  assert.equal(parseSecretFieldManifest(["x"]), undefined);
+  assert.equal(parseSecretFieldManifest({ a: { secret: "password" }, b: 5, "": { secret: ["x"] } }), undefined);
+  const m = parseSecretFieldManifest({ smtp_email: { secret: ["password", 7, ""], maps: null }, constructor: { maps: ["options"] } });
+  assert.deepEqual(JSON.parse(JSON.stringify(m)), { smtp_email: { secret: ["password"], maps: [] }, constructor: { secret: [], maps: ["options"] } });
+  assert.equal(Object.getPrototypeOf(m), null);
+  const huge = parseSecretFieldManifest({ t: { secret: Array.from({ length: 1000 }, (_, i) => `f${i}`) } });
+  assert.equal(huge?.t.secret.length, 200);
+  // A record whose type matches an Object.prototype name must not crash or mask anything extra.
+  assert.deepEqual(maskSecrets({ type: "toString", config: { host: "x" } }, {}, { manifest: parseSecretFieldManifest({ gcm: { secret: ["api_key"] } }) }), {
+    type: "toString",
+    config: { host: "x" },
   });
 });
 

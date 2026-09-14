@@ -2,6 +2,30 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
+## 0.5.0 — 2026-09-14
+
+### Added
+- Type-aware secret masking. The name rules can't know every service type:
+  a gcm or APNs `certificate`, for example, doesn't look like a secret by
+  name. df-mcp-server now sends, in the proxy envelope as `_mcpSecretFields`,
+  each installed service type's secret config fields, built from
+  DreamFactory's own model metadata (`$encrypted`, `$protected`, and fields
+  the schema types as password or certificate). On any record with a `type`
+  and a `config`, that type's fields are masked. Keys of user-named
+  key/value maps (a script service's `config`, SOAP `options`) are masked when
+  they look like credentials, e.g. `STRIPE_KEY`. The manifest is bound to the
+  MCP session at initialize. It only adds masking: malformed entries are
+  dropped, and without it the name rules still apply.
+
+### Security
+- `api_key` in service configs (gcm, openstack, rackspace) was returned in
+  the clear, because the name rules skipped `api_key` and left it to the app
+  tools' hint masking. It is now masked in every response. App tools still
+  return `api_key: null` with `api_key_hint`, and `create_app` still returns
+  its new key. `MCP_EXPOSE_API_KEYS=true` exposes both.
+- `passcode` (Snowflake) and plural names (`api_keys`, `passwords`,
+  `secrets`, `tokens`, `private_keys`) are masked by name.
+
 ## 0.4.1 — 2026-09-14
 
 ### Security

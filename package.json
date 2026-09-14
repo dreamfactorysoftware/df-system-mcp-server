@@ -1,6 +1,6 @@
 {
   "name": "df-system-mcp-server",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "MCP server exposing DreamFactory System (control-plane) API as MCP tools.",
   "main": "build/index.js",
   "type": "commonjs",

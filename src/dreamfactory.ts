@@ -131,6 +131,9 @@ export async function dreamFactoryFetch(
       }
     }
 
+    // The session's manifest travels with the result so toToolResponse can mask with it.
+    const manifest = auth.secretFields ? { secretFields: auth.secretFields } : {};
+
     if (!res.ok) {
       // DreamFactory error shape: { error: { code, message, context? } }
       let message = `HTTP ${res.status} ${res.statusText}`;
@@ -143,10 +146,10 @@ export async function dreamFactoryFetch(
           message = (parsed as { message: string }).message;
         }
       }
-      return { ok: false, status: res.status, error: message, details: parsed };
+      return { ok: false, status: res.status, error: message, details: parsed, ...manifest };
     }
 
-    return { ok: true, status: res.status, data: parsed };
+    return { ok: true, status: res.status, data: parsed, ...manifest };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // Never include headers or tokens in the error.
@@ -162,12 +165,19 @@ export async function dreamFactoryFetch(
  * Convert a DreamFactoryResult into the MCP tool text response shape.
  * Caller should pass a label that describes the operation for error context.
  * Every tool response passes through here, so secret masking (src/redact.ts)
- * is applied centrally; API-key masking stays with the tools that return apps.
+ * is applied centrally, with the session's secret-field manifest when it has
+ * one. API-key hints stay with the tools that return apps; create_app passes
+ * `keepApiKeys` so the key it just minted reaches the caller.
  */
-export function toToolResponse(label: string, result: DreamFactoryResult): ToolTextResponse {
+export function toToolResponse(
+  label: string,
+  result: DreamFactoryResult,
+  options: { keepApiKeys?: boolean } = {},
+): ToolTextResponse {
+  const mask = { manifest: result.secretFields, keepApiKeys: options.keepApiKeys };
   if (result.ok) {
     return {
-      content: [{ type: "text", text: JSON.stringify(maskSecrets(result.data), null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(maskSecrets(result.data, process.env, mask), null, 2) }],
     };
   }
   const payload: Record<string, unknown> = {
@@ -175,7 +185,7 @@ export function toToolResponse(label: string, result: DreamFactoryResult): ToolT
     status: result.status,
     operation: label,
   };
-  if (result.details !== undefined) payload.details = maskSecrets(result.details);
+  if (result.details !== undefined) payload.details = maskSecrets(result.details, process.env, mask);
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     isError: true,

@@ -15,7 +15,20 @@ export interface AuthContext {
   baseUrl?: string;
   /** Optional trace id (from X-DreamFactory-Trace-Id). Forwarded back on DF calls. */
   traceId?: string;
+  /** Secret config fields per service type, sent by df-mcp-server in the proxy envelope. */
+  secretFields?: SecretFieldManifest;
 }
+
+/** One service type's secret config fields (see redact.ts). */
+export interface SecretFieldEntry {
+  /** Config fields whose value is a secret (DreamFactory $encrypted / $protected, password and certificate fields). */
+  secret: string[];
+  /** Config fields that are user-named key/value maps; their values are masked by key name. */
+  maps: string[];
+}
+
+/** Service type name -> secret fields, built by df-mcp-server from DreamFactory's model metadata. */
+export type SecretFieldManifest = Record<string, SecretFieldEntry>;
 
 /** Subset of the DreamFactory service config the PHP proxy forwards to us. */
 export interface McpServiceConfig {
@@ -36,10 +49,13 @@ export interface DreamFactoryFetchOptions {
   auth?: AuthContext;
 }
 
-/** Uniform success / failure envelope returned by dreamFactoryFetch. */
+/**
+ * Uniform success / failure envelope returned by dreamFactoryFetch. `secretFields` carries the
+ * session's manifest to toToolResponse, which masks with it.
+ */
 export type DreamFactoryResult =
-  | { ok: true; status: number; data: unknown }
-  | { ok: false; status: number; error: string; details?: unknown };
+  | { ok: true; status: number; data: unknown; secretFields?: SecretFieldManifest }
+  | { ok: false; status: number; error: string; details?: unknown; secretFields?: SecretFieldManifest };
 
 /** Standard MCP text-content tool response. */
 export interface ToolTextResponse {

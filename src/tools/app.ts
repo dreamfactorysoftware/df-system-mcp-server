@@ -107,7 +107,7 @@ export function registerAppTools(server: McpServer, opts?: RegisterToolOptions):
         },
       });
       // Deliberately NOT masked: the new key is only useful if the caller sees it.
-      return toToolResponse("create_app", result);
+      return toToolResponse("create_app", result, { keepApiKeys: true });
     },
   );
 }

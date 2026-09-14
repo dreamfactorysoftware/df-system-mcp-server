@@ -7,7 +7,8 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { buildMcpServer, SERVER_NAME, SERVER_VERSION } from "./server";
 import { TOOL_COUNT } from "./tools";
 import { clearAuthForSession, getBaseUrl, setAuthForSession } from "./dreamfactory";
-import type { AuthContext, McpServiceConfig } from "./types";
+import { parseSecretFieldManifest } from "./redact";
+import type { AuthContext, McpServiceConfig, SecretFieldManifest } from "./types";
 import {
   acceptBaseUrl,
   buildAllowedOrigins,
@@ -97,6 +98,7 @@ function mergeAuth(prev: AuthContext | undefined, next: AuthContext): AuthContex
     apiKey: next.apiKey ?? prev?.apiKey,
     baseUrl: prev?.baseUrl ?? next.baseUrl,
     traceId: next.traceId ?? prev?.traceId,
+    secretFields: next.secretFields ?? prev?.secretFields,
   };
 }
 
@@ -113,10 +115,16 @@ function isOneShot(req: Request): boolean {
 
 /**
  * Unwrap the PHP proxy envelope on POST bodies:
- *   { "_mcpPayload": <json-rpc>, "_mcpConfig": <service config>, "_mcpAvailableServices": [...] }
+ *   { "_mcpPayload": <json-rpc>, "_mcpConfig": <service config>, "_mcpAvailableServices": [...],
+ *     "_mcpSecretFields": { <service type>: { secret: [...], maps: [...] } } }
+ * `_mcpSecretFields` is optional (df-mcp-server sends it for system_mcp services).
  * Direct-mode clients send the bare JSON-RPC message, which passes through untouched.
  */
-function unwrapEnvelope(body: unknown): { payload: unknown; config: McpServiceConfig | undefined } {
+function unwrapEnvelope(body: unknown): {
+  payload: unknown;
+  config: McpServiceConfig | undefined;
+  secretFields: SecretFieldManifest | undefined;
+} {
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const b = body as Record<string, unknown>;
     if (b._mcpPayload !== undefined) {
@@ -124,10 +132,11 @@ function unwrapEnvelope(body: unknown): { payload: unknown; config: McpServiceCo
       return {
         payload: b._mcpPayload,
         config: cfg && typeof cfg === "object" ? (cfg as McpServiceConfig) : undefined,
+        secretFields: parseSecretFieldManifest(b._mcpSecretFields),
       };
     }
   }
-  return { payload: body, config: undefined };
+  return { payload: body, config: undefined, secretFields: undefined };
 }
 
 /** GET/DELETE carry the service config as a JSON string in X-Mcp-Config. */
@@ -269,7 +278,7 @@ app.use(["/mcp", "/mcp/:serviceName"], requireInternalKey);
 const handlePost = async (req: Request, res: Response) => {
   const incomingSessionId = req.header("mcp-session-id");
   const serviceName = nonEmpty(req.params.serviceName);
-  const { payload, config } = unwrapEnvelope(req.body);
+  const { payload, config, secretFields } = unwrapEnvelope(req.body);
 
   try {
     let transport: StreamableHTTPServerTransport | undefined;
@@ -284,10 +293,14 @@ const handlePost = async (req: Request, res: Response) => {
         sendSessionNotFound(res);
         return;
       }
+      if (secretFields) {
+        entry.auth = { ...entry.auth, secretFields };
+        setAuthForSession(incomingSessionId, entry.auth);
+      }
       transport = entry.transport;
     } else if (isInitializeRequest(payload)) {
       // Brand-new session: spin up a fresh transport + McpServer.
-      const auth = extractAuthContext(req);
+      const auth: AuthContext = { ...extractAuthContext(req), ...(secretFields ? { secretFields } : {}) };
       const oneShot = isOneShot(req);
       const t = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
