@@ -2,6 +2,43 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
+import type { AuthContext, DreamFactoryResult } from "../types";
+
+/** Service names DreamFactory accepts; anything else can't be a name and is never put into a filter. */
+const SERVICE_NAME = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * Resolve an `id_or_name` argument to a numeric service id. DreamFactory's
+ * system/service/{id} only takes ids (a name there is a 404), so a name is
+ * looked up with a `name='...'` filter first.
+ */
+export async function resolveServiceId(
+  idOrName: string,
+  auth: AuthContext | undefined,
+): Promise<{ id: string } | { failure: DreamFactoryResult }> {
+  const value = idOrName.trim();
+  if (/^\d+$/.test(value)) return { id: value };
+  if (!SERVICE_NAME.test(value)) {
+    return {
+      failure: {
+        ok: false,
+        status: 400,
+        error: `invalid service id or name '${idOrName}': use the numeric id or the service name (letters, digits, _ . -)`,
+      },
+    };
+  }
+  const found = await dreamFactoryFetch("GET", "system/service", {
+    auth,
+    query: { filter: `name='${value}'`, fields: "id,name" },
+  });
+  if (!found.ok) return { failure: found };
+  const rows = (found.data as { resource?: { id?: unknown }[] } | undefined)?.resource ?? [];
+  const id = rows[0]?.id;
+  if (typeof id !== "number" && typeof id !== "string") {
+    return { failure: { ok: false, status: 404, error: `no service named '${value}'` } };
+  }
+  return { id: String(id) };
+}
 
 /**
  * Register the service-CRUD tool family on the given MCP server.
@@ -62,11 +99,9 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
     },
     async ({ id_or_name }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "GET",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("get_service", target.failure);
+      const result = await dreamFactoryFetch("GET", `system/service/${target.id}`, { auth });
       return toToolResponse("get_service", result);
     },
   );
@@ -141,11 +176,9 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
     },
     async ({ id_or_name, patch }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "PATCH",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth, body: patch },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("update_service", target.failure);
+      const result = await dreamFactoryFetch("PATCH", `system/service/${target.id}`, { auth, body: patch });
       return toToolResponse("update_service", result);
     },
   );
@@ -162,11 +195,9 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
     },
     async ({ id_or_name }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "DELETE",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("delete_service", target.failure);
+      const result = await dreamFactoryFetch("DELETE", `system/service/${target.id}`, { auth });
       return toToolResponse("delete_service", result);
     },
   );

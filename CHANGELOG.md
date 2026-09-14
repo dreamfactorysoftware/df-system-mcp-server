@@ -33,6 +33,13 @@ All notable changes to `df-system-mcp-server` are documented here.
 ### Added
 - `MCP_EXPOSE_SECRETS=true` turns secret masking off.
 
+### Fixed
+- `get_service`, `update_service` and `delete_service` accept a service name,
+  as their descriptions say. They passed the name straight into
+  `system/service/{id}`, which DreamFactory answers with a 404; a name is now
+  resolved to its id with a `name='...'` filter first. Values that can't be a
+  service name are rejected without a request.
+
 ## 0.4.0 — 2026-09-14
 
 Runs as a daemon on the DreamFactory host, not only as a sidecar container.

@@ -191,6 +191,21 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
         res.end(JSON.stringify({ id: 24, name: "rest-api", type: "rws", config: SERVICE_24_CONFIG }));
       } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/24")) {
         res.end(JSON.stringify({ id: 24, name: "rest-api", type: "rws", config: SERVICE_24_CONFIG }));
+      } else if (req.method === "DELETE" && url.startsWith("/api/v2/system/service/24")) {
+        res.end(JSON.stringify({ id: 24 }));
+      } else if (
+        req.method === "GET" &&
+        url.startsWith("/api/v2/system/service?") &&
+        (new URL(url, "http://mock").searchParams.get("filter") ?? "").startsWith("name=")
+      ) {
+        // Name lookup, as DreamFactory answers ?filter=name='x' (system/service/{name} is a 404 there).
+        const wanted = /^name='([^']*)'$/.exec(new URL(url, "http://mock").searchParams.get("filter") ?? "")?.[1];
+        const services = [
+          { id: 1, name: "mysql-prod" },
+          { id: 7, name: "mail" },
+          { id: 24, name: "rest-api" },
+        ];
+        res.end(JSON.stringify({ resource: services.filter((s) => s.name === wanted) }));
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/7")) {
         res.end(JSON.stringify({ id: 7, name: "mail", type: "smtp_email", config: SERVICE_7_CONFIG }));
       } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/7")) {
@@ -727,6 +742,64 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal(mock.seen.length, seenBefore + 1);
     assert.equal(mock.seen[seenBefore].method, "PATCH");
     noRwsSecrets(ok.text, "update_service rws response");
+  });
+
+  await t.test("service tools accept a name: resolved to the id with a filter first", async () => {
+    const sid = await openSession(baseUrl);
+    let id = 600;
+    const callRaw = async (name: string, args: Record<string, unknown>) => {
+      const rid = ++id;
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id: rid, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, rid);
+      return { isError: result.isError === true, text: (result.content as { text: string }[])[0].text };
+    };
+    const filterOf = (url: string) => new URL(url, "http://mock").searchParams.get("filter");
+
+    let before = mock.seen.length;
+    const got = await callRaw("get_service", { id_or_name: "rest-api" });
+    assert.equal(got.isError, false, got.text);
+    assert.equal(JSON.parse(got.text).id, 24);
+    let sent = mock.seen.slice(before);
+    assert.equal(sent.length, 2, "one lookup, then the record by id");
+    assert.equal(filterOf(sent[0].url), "name='rest-api'");
+    assert.equal(sent[1].url, "/api/v2/system/service/24");
+
+    before = mock.seen.length;
+    const byId = await callRaw("get_service", { id_or_name: "24" });
+    assert.equal(byId.isError, false, byId.text);
+    sent = mock.seen.slice(before);
+    assert.deepEqual(sent.map((s) => s.url), ["/api/v2/system/service/24"], "a numeric id needs no lookup");
+
+    before = mock.seen.length;
+    const upd = await callRaw("update_service", { id_or_name: "mail", patch: { label: "Mail" } });
+    assert.equal(upd.isError, false, upd.text);
+    sent = mock.seen.slice(before);
+    assert.equal(filterOf(sent[0].url), "name='mail'");
+    assert.equal(sent[1].method, "PATCH");
+    assert.equal(sent[1].url, "/api/v2/system/service/7");
+
+    before = mock.seen.length;
+    const del = await callRaw("delete_service", { id_or_name: "rest-api" });
+    assert.equal(del.isError, false, del.text);
+    sent = mock.seen.slice(before);
+    assert.equal(sent[1].method, "DELETE");
+    assert.equal(sent[1].url, "/api/v2/system/service/24");
+
+    before = mock.seen.length;
+    const missing = await callRaw("get_service", { id_or_name: "no-such-service" });
+    assert.equal(missing.isError, true, missing.text);
+    assert.match(missing.text, /no service named 'no-such-service'/);
+    assert.equal(mock.seen.length, before + 1, "only the lookup is sent for an unknown name");
+
+    before = mock.seen.length;
+    const injected = await callRaw("delete_service", { id_or_name: "x' or '1'='1" });
+    assert.equal(injected.isError, true, injected.text);
+    assert.match(injected.text, /invalid service id or name/);
+    assert.equal(mock.seen.length, before, "a value that can't be a name is never sent");
   });
 
   await t.test("get_access_audit: param passthrough, only_flagged, validation, 404/403", async () => {
