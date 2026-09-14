@@ -6,10 +6,11 @@ import type {
 } from "./types";
 
 /**
- * Resolved DreamFactory base URL (e.g. http://web/api/v2). Trimmed of any trailing slash.
+ * Resolved DreamFactory base URL. Trimmed of any trailing slash. Defaults to
+ * DreamFactory on the same host; the Docker image sets http://web/api/v2.
  */
 export function getBaseUrl(): string {
-  const raw = process.env.DREAMFACTORY_URL || "http://web/api/v2";
+  const raw = process.env.DREAMFACTORY_URL || "http://127.0.0.1/api/v2";
   return raw.replace(/\/+$/, "");
 }
 

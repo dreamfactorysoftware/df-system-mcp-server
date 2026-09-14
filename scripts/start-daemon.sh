@@ -1,24 +1,30 @@
 #!/usr/bin/env sh
 # Bare-node launcher for df-system-mcp-server (no Docker).
 #
+# On a DreamFactory host, use df-mcp-server's scripts/start-system-daemon.sh
+# instead: it finds this package under vendor/ and installs its dependencies.
+#
 # Usage:
-#   PORT=3700 HOST=127.0.0.1 DREAMFACTORY_URL=http://localhost/api/v2 scripts/start-daemon.sh
+#   npm ci --omit=dev && scripts/start-daemon.sh
 #
 # Environment passthrough (all optional):
-#   PORT                 listen port            (default 3700)
-#   HOST                 listen address         (default 0.0.0.0)
-#   DREAMFACTORY_URL     DF base URL incl. /api/v2 (default http://web/api/v2);
-#                        overridden per-session by X-Mcp-Base-Url from df-mcp-server
+#   MCP_SYSTEM_DAEMON_PORT  listen port (or PORT; default 3700)
+#   MCP_SYSTEM_DAEMON_HOST  listen address (or HOST; default 127.0.0.1)
+#   DREAMFACTORY_URL     DF base URL incl. /api/v2 (default http://127.0.0.1/api/v2);
+#                        overridden per session by X-Mcp-Base-Url from df-mcp-server
 #   MCP_INTERNAL_KEY     shared secret; when set, every /mcp* request must send X-Mcp-Internal-Key
+#   MCP_TRUST_LOOPBACK   "false" ignores local callers' X-Mcp-Base-Url on a loopback bind
 #   SESSION_TTL_SECONDS  idle MCP session eviction window (default 1800)
 #   MCP_EXPOSE_API_KEYS  "true" sends full app API keys to the LLM (default: masked)
 set -eu
 cd "$(dirname "$0")/.."
-if [ ! -x node_modules/.bin/tsx ]; then
-  echo "node_modules/.bin/tsx not found — run 'npm install' first" >&2
+if [ ! -f build/index.js ]; then
+  echo "build/index.js not found — run 'npm install && npm run build' first" >&2
   exit 1
 fi
-export PORT="${PORT:-3700}"
-export HOST="${HOST:-0.0.0.0}"
-export DREAMFACTORY_URL="${DREAMFACTORY_URL:-http://web/api/v2}"
-exec node_modules/.bin/tsx src/index.ts
+if [ ! -d node_modules/@modelcontextprotocol/sdk ]; then
+  echo "dependencies not installed — run 'npm ci --omit=dev' first" >&2
+  exit 1
+fi
+export NODE_ENV="${NODE_ENV:-production}"
+exec node build/index.js

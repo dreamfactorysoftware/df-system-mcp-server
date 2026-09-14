@@ -90,9 +90,10 @@ of that token — non-admin tokens cannot administer the instance. Tokens and ke
 
 | Env var               | Default             | Purpose |
 | --------------------- | ------------------- | ------- |
-| `PORT`                | `3700`              | HTTP listen port. |
-| `HOST`                | `0.0.0.0`           | HTTP listen host. |
-| `DREAMFACTORY_URL`    | `http://web/api/v2` | Default DreamFactory base URL (no trailing slash required). Overridden per session by `X-Mcp-Base-Url`. |
+| `MCP_SYSTEM_DAEMON_PORT` (or `PORT`) | `3700` | HTTP listen port. The prefixed name wins, so a generic `PORT` on the DreamFactory host doesn't move the daemon. |
+| `MCP_SYSTEM_DAEMON_HOST` (or `HOST`) | `127.0.0.1` | HTTP listen address. The Docker image sets `0.0.0.0`. |
+| `DREAMFACTORY_URL`    | `http://127.0.0.1/api/v2` | Default DreamFactory base URL (no trailing slash required). Overridden per session by `X-Mcp-Base-Url`. The Docker image sets `http://web/api/v2`. |
+| `MCP_TRUST_LOOPBACK`  | `true`              | When the daemon listens on loopback, local callers may set `X-Mcp-Base-Url` without the internal key (see [Trust boundary](#trust-boundary)). `false` requires the key or the allowlist even locally. |
 | `MCP_INTERNAL_KEY`    | *(unset)*           | Shared secret. When set, every `/mcp*` request must send a matching `X-Mcp-Internal-Key`. Set the same value as `MCP_INTERNAL_KEY` in the DreamFactory `.env`. |
 | `SESSION_TTL_SECONDS` | `1800`              | Idle MCP sessions older than this are closed and their auth context dropped (`0` disables). Requests with an evicted id get `404 Session not found`. |
 | `MCP_ALLOWED_BASE_URLS` | *(unset)*         | Comma-separated extra origins that untrusted callers may name in `X-Mcp-Base-Url` (the `DREAMFACTORY_URL` origin is always allowed). Not needed when `MCP_INTERNAL_KEY` is set. |
@@ -105,13 +106,18 @@ act with it — that is by design (the token is the authorisation). What the dae
 allow is a caller redirecting where that token is sent. Therefore:
 
 - `X-Mcp-Base-Url` is honoured only from callers that presented the correct `X-Mcp-Internal-Key`
-  (the DreamFactory PHP proxy) or whose origin is on the allowlist; everyone else gets
-  `DREAMFACTORY_URL`. Set `MCP_INTERNAL_KEY` in production.
+  (the DreamFactory PHP proxy), from local callers when the daemon listens on loopback (the
+  default deployment next to DreamFactory, where only processes on that host can reach it;
+  `MCP_TRUST_LOOPBACK=false` turns this off), or from callers whose origin is on the allowlist.
+  Everyone else gets `DREAMFACTORY_URL`. Set `MCP_INTERNAL_KEY` whenever the daemon listens
+  on a network interface.
 - The base URL is fixed at `initialize`; knowing a live `Mcp-Session-Id` does not let a caller
   rebind that session's base URL.
 - `call_system_api` validates the **resolved** URL: `system/../db/_table/x`, `%2e%2e`,
   backslashes, absolute URLs and embedded `?`/`#` are all rejected before any request is made.
-- Bind the daemon to a private interface / Docker network; it has no user-facing auth of its own.
+- Keep the daemon on loopback (the default) or a private Docker network; it has no user-facing
+  auth of its own. If a same-host reverse proxy forwards outside traffic to it, set
+  `MCP_TRUST_LOOPBACK=false` and `MCP_INTERNAL_KEY`.
 
 ### DreamFactory side
 
@@ -119,8 +125,8 @@ In the DreamFactory `.env` (df-mcp-server >= 1.4 / DF 7.7.x):
 
 ```
 MCP_SYSTEM_DAEMON_ENABLED=true
-MCP_SYSTEM_DAEMON_URL=http://df-system-mcp:3700   # or http://127.0.0.1:3700 for bare node
-MCP_INTERNAL_KEY=change-me                        # optional, must match this daemon
+MCP_SYSTEM_DAEMON_URL=http://127.0.0.1:3700       # the default; http://df-system-mcp:3700 for a sidecar
+MCP_INTERNAL_KEY=change-me                        # must match this daemon; recommended for a sidecar
 ```
 
 Then create a service of type **System API MCP Server** (`system_mcp`), e.g. `sysmcp`, and point
@@ -188,9 +194,22 @@ npm run dev            # tsx src/index.ts
 npm test               # runs every tests/*.test.ts (smoke + proxy contract)
 ```
 
+`build/` is committed: DreamFactory installs this package with composer and runs
+`node build/index.js` without a TypeScript toolchain. Run `npm run build` and commit the
+result with every `src/` change; CI fails when `build/` is stale.
+
 ## Running
 
-### Docker
+### On the DreamFactory host (default)
+
+Composer installs this package next to df-mcp-server (`vendor/dreamfactory/df-system-mcp-server`).
+df-mcp-server's `scripts/start-system-daemon.sh` (or `start-system-daemon-win.ps1`) installs the
+production dependencies on first run and starts `node build/index.js` on `127.0.0.1:3700`,
+calling DreamFactory back on `http://127.0.0.1/api/v2`. The DreamFactory Docker image starts it
+next to the data daemon; on a VM, run the script from a systemd unit. No `.env` change is
+needed: df-mcp-server already defaults `MCP_SYSTEM_DAEMON_URL` to `http://127.0.0.1:3700`.
+
+### Docker sidecar
 
 ```bash
 docker build -t df-system-mcp .
@@ -206,11 +225,14 @@ Or with the bundled example compose file (joins the `dreamfactory_default` netwo
 docker compose -f docker-compose.example.yml up -d --build
 ```
 
+A sidecar listens on a network interface, so set `MCP_INTERNAL_KEY` on both sides and
+`MCP_SYSTEM_DAEMON_BASE_URL=http://web` in DreamFactory.
+
 ### Bare node
 
 ```bash
-npm install
-PORT=3700 HOST=127.0.0.1 DREAMFACTORY_URL=http://localhost/api/v2 scripts/start-daemon.sh
+npm ci --omit=dev
+scripts/start-daemon.sh    # 127.0.0.1:3700, DreamFactory at http://127.0.0.1/api/v2
 ```
 
 ## Calling from the PHP orchestrator (direct mode)

@@ -1,0 +1,19 @@
+{
+  "name": "dreamfactory/df-system-mcp-server",
+  "description": "DreamFactory System API MCP server: the Node.js daemon behind the system_mcp service type of dreamfactory/df-mcp-server.",
+  "type": "library",
+  "license": "",
+  "authors": [
+    {
+      "name": "DreamFactory",
+      "role": "Developer"
+    }
+  ],
+  "extra": {
+    "branch-alias": {
+      "dev-main": "0.4.x-dev"
+    }
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true
+}

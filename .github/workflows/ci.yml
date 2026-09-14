@@ -22,4 +22,11 @@ jobs:
       - run: npm run build
         env:
           NODE_OPTIONS: --max-old-space-size=4096
+      - name: Committed build/ matches src/
+        run: |
+          if [ -n "$(git status --porcelain -- build/)" ]; then
+            git status --porcelain -- build/
+            echo "::error::build/ is stale; run npm run build and commit it"
+            exit 1
+          fi
       - run: npm test

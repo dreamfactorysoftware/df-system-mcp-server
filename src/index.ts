@@ -8,10 +8,28 @@ import { buildMcpServer, SERVER_NAME, SERVER_VERSION } from "./server";
 import { TOOL_COUNT } from "./tools";
 import { clearAuthForSession, getBaseUrl, setAuthForSession } from "./dreamfactory";
 import type { AuthContext, McpServiceConfig } from "./types";
-import { acceptBaseUrl, buildAllowedOrigins, safeEqual } from "./trust";
+import {
+  acceptBaseUrl,
+  buildAllowedOrigins,
+  isLoopbackAddress,
+  isLoopbackHost,
+  safeEqual,
+} from "./trust";
 
-const PORT = parseInt(process.env.PORT || "3700", 10);
-const HOST = process.env.HOST || "0.0.0.0";
+/**
+ * Listen address. The MCP_SYSTEM_DAEMON_* names win over generic PORT/HOST, which
+ * may mean something else on a DreamFactory host. Loopback by default: the usual
+ * deployment is a daemon next to DreamFactory; the Docker image sets HOST=0.0.0.0.
+ */
+const PORT = parseInt(process.env.MCP_SYSTEM_DAEMON_PORT || process.env.PORT || "3700", 10);
+const HOST = process.env.MCP_SYSTEM_DAEMON_HOST || process.env.HOST || "127.0.0.1";
+/**
+ * On a loopback bind, local callers (DreamFactory's PHP proxy) may set
+ * X-Mcp-Base-Url without the internal key, as with df-mcp-server's data daemon.
+ * MCP_TRUST_LOOPBACK=false turns this off, e.g. behind a same-host reverse proxy.
+ */
+const TRUST_LOOPBACK =
+  isLoopbackHost(HOST) && !/^(0|false|no|off)$/i.test((process.env.MCP_TRUST_LOOPBACK ?? "").trim());
 /** Shared secret; when set every /mcp* request must carry X-Mcp-Internal-Key. */
 const INTERNAL_KEY = process.env.MCP_INTERNAL_KEY || "";
 /** Idle-session eviction window (seconds). Default 30 minutes. */
@@ -51,11 +69,12 @@ function extractAuthContext(req: Request): AuthContext {
   const presented = nonEmpty(req.header("x-mcp-base-url"));
   const baseUrl = acceptBaseUrl(presented, {
     internalKeyVerified: internalKeyVerified(req),
+    loopbackCaller: TRUST_LOOPBACK && isLoopbackAddress(req.socket.remoteAddress),
     allowedOrigins: ALLOWED_BASE_ORIGINS,
   });
   if (presented && !baseUrl) {
     console.warn(
-      "[df-system-mcp] ignoring X-Mcp-Base-Url from untrusted caller (set MCP_INTERNAL_KEY or MCP_ALLOWED_BASE_URLS)",
+      "[df-system-mcp] ignoring X-Mcp-Base-Url from untrusted caller (set MCP_INTERNAL_KEY or MCP_ALLOWED_BASE_URLS, or listen on 127.0.0.1)",
     );
   }
   return {
@@ -211,6 +230,8 @@ const health = (_req: Request, res: Response) => {
     mode: "stateful",
     active_sessions: sessions.size,
     dreamfactory_url: getBaseUrl(),
+    listen: `${HOST}:${PORT}`,
+    loopback_trust: TRUST_LOOPBACK,
   });
 };
 app.get("/health", health);
@@ -389,7 +410,8 @@ sweeper.unref();
 const httpServer = app.listen(PORT, HOST, () => {
   console.log(
     `[df-system-mcp] listening on http://${HOST}:${PORT}  (tools=${TOOL_COUNT}, df=${getBaseUrl()}, ` +
-      `internal_key=${INTERNAL_KEY ? "required" : "off"}, session_ttl=${SESSION_TTL_SECONDS}s, ` +
+      `internal_key=${INTERNAL_KEY ? "required" : "off"}, loopback_trust=${TRUST_LOOPBACK ? "on" : "off"}, ` +
+      `session_ttl=${SESSION_TTL_SECONDS}s, ` +
       `allowed_base_origins=${[...ALLOWED_BASE_ORIGINS].join("|")})`,
   );
 });

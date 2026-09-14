@@ -2,6 +2,33 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
+## 0.4.0 — 2026-09-14
+
+Runs as a daemon on the DreamFactory host, not only as a sidecar container.
+df-mcp-server's `scripts/start-system-daemon.sh` starts it from
+`vendor/dreamfactory/df-system-mcp-server`.
+
+### Added
+- `composer.json` (`dreamfactory/df-system-mcp-server`), so composer installs
+  the daemon next to df-mcp-server.
+- `build/` is committed. `npm start` and `scripts/start-daemon.sh` run
+  `node build/index.js` with production dependencies only (no `tsx` at
+  runtime). CI fails when `build/` doesn't match `src/`.
+- `MCP_SYSTEM_DAEMON_PORT` / `MCP_SYSTEM_DAEMON_HOST`, which take precedence
+  over `PORT` / `HOST`.
+- `MCP_TRUST_LOOPBACK` (default on): when the daemon listens on loopback, local
+  callers may set `X-Mcp-Base-Url` without `MCP_INTERNAL_KEY`, as with
+  df-mcp-server's data daemon. `/health` reports `listen` and `loopback_trust`.
+- `engines.node` `>=20`.
+
+### Changed
+- Defaults suit a daemon next to DreamFactory: listen on `127.0.0.1` (was
+  `0.0.0.0`) and call DreamFactory on `http://127.0.0.1/api/v2` (was
+  `http://web/api/v2`). The Docker image and `docker-compose.example.yml` still
+  set `0.0.0.0` and `http://web/api/v2`, so sidecars behave as before.
+- The Docker image runs the committed build with production dependencies
+  (was `tsx` plus dev dependencies), and its healthcheck follows `$PORT`.
+
 ## 0.3.0 — 2026-09-10
 
 Adds a usage-audit tool and stops sending app API keys to the LLM. Tool count
