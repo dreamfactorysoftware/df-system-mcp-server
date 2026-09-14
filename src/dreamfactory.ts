@@ -1,4 +1,4 @@
-import { maskedPathsInArrays, maskSecrets, stripMaskedSecrets } from "./redact";
+import { maskSecrets, stripMaskedSecrets, unwritableMaskPaths } from "./redact";
 import type {
   AuthContext,
   DreamFactoryFetchOptions,
@@ -65,7 +65,8 @@ function buildQuery(query?: Record<string, string | number | boolean | undefined
  * - Uses the per-session base URL (X-Mcp-Base-Url) when present, else DREAMFACTORY_URL.
  * - Sets Accept: application/json (and Content-Type when a body is present).
  * - Drops masked secrets ("**********") from the body so they never overwrite real ones, and
- *   refuses a body with a mask inside a list, which DreamFactory would store as the value.
+ *   refuses a body with a mask that can't be dropped (inside a list or nested value, or part
+ *   of a longer string), which DreamFactory would store as the value.
  * - Never logs the session token.
  * - Returns a uniform { ok, status, data | error } envelope.
  */
@@ -86,16 +87,16 @@ export async function dreamFactoryFetch(
   }
 
   if (opts.body !== undefined && opts.body !== null) {
-    const maskedInLists = maskedPathsInArrays(opts.body);
-    if (maskedInLists.length > 0) {
-      const shown = maskedInLists.slice(0, 5).join(", ") + (maskedInLists.length > 5 ? ", ..." : "");
+    const unwritable = unwritableMaskPaths(opts.body);
+    if (unwritable.length > 0) {
+      const shown = unwritable.slice(0, 5).join(", ") + (unwritable.length > 5 ? ", ..." : "");
       return {
         ok: false,
         status: 400,
         error:
-          `refusing to write masked secret(s) at ${shown}: DreamFactory replaces lists such as RWS headers and ` +
-          'parameters as a whole, so "**********" would be stored as the value. Send the real values, or leave ' +
-          "that list out of the request to keep the stored one.",
+          `refusing to write masked secret(s) at ${shown}: DreamFactory stores lists and nested values such as ` +
+          'RWS headers, parameters and options as a whole, so "**********" would be saved as the value. Send the ' +
+          "real values, or leave that field out of the request to keep the stored one.",
       };
     }
   }

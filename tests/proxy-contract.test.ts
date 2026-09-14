@@ -36,8 +36,10 @@ const PRIVATE_KEY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7mockpri
 const PRIVATE_LOOKUP_VALUE = "lookup-secret-42";
 const RWS_BASIC_AUTH = "Basic cmVwb3J0czpodW50ZXIy";
 const RWS_PARAM_KEY = "rws-query-api-key-77";
+const RWS_PROXY_PASS = "proxy-pass-3128x";
 const SERVICE_24_CONFIG = {
   base_url: "https://api.example.com/v1",
+  options: { CURLOPT_PROXY: `http://proxyuser:${RWS_PROXY_PASS}@proxy.example.com:3128`, CURLOPT_TIMEOUT: 30 },
   headers: [
     { id: 13, service_id: 24, name: "Accept", value: "application/json", pass_from_client: false, action: 1 },
     { id: 15, service_id: 24, name: "Authorization", value: RWS_BASIC_AUTH, pass_from_client: false, action: 1 },
@@ -677,7 +679,7 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal("oauth_client_secret" in sentBody.config, false);
   });
 
-  await t.test("RWS header and parameter values are masked; masked lists are never written", async () => {
+  await t.test("RWS credential headers and parameters are masked, the rest stay readable; masked lists are never written", async () => {
     const sid = await openSession(baseUrl);
     let id = 500;
     const callRaw = async (name: string, args: Record<string, unknown>) => {
@@ -694,6 +696,7 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
       assert.ok(!text.includes(RWS_BASIC_AUTH), `${label} leaked the Authorization header`);
       assert.ok(!text.includes(RWS_BASIC_AUTH.slice(6)), `${label} leaked the base64 credential`);
       assert.ok(!text.includes(RWS_PARAM_KEY), `${label} leaked the api_key parameter`);
+      assert.ok(!text.includes(RWS_PROXY_PASS), `${label} leaked the proxy password`);
     };
 
     const got = await callRaw("get_service", { id_or_name: "24" });
@@ -703,18 +706,22 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.deepEqual(
       svc.config.headers.map((h: { name: string; value: string }) => [h.name, h.value]),
       [
-        ["Accept", "**********"],
+        ["Accept", "application/json"],
         ["Authorization", "**********"],
       ],
     );
     assert.deepEqual(
       svc.config.parameters.map((p: { name: string; value: string }) => [p.name, p.value]),
       [
-        ["limit", "**********"],
+        ["limit", "10"],
         ["api_key", "**********"],
       ],
     );
     assert.equal(svc.config.base_url, "https://api.example.com/v1");
+    assert.deepEqual(svc.config.options, {
+      CURLOPT_PROXY: "http://proxyuser:**********@proxy.example.com:3128",
+      CURLOPT_TIMEOUT: 30,
+    });
     noRwsSecrets((await callRaw("call_system_api", { method: "GET", path: "system/service/24" })).text, "call_system_api rws");
 
     // Sending the masked headers back would replace the stored list with "**********" values: refused, never sent.
@@ -724,13 +731,19 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
       patch: { config: { headers: svc.config.headers } },
     });
     assert.equal(refused.isError, true, refused.text);
-    assert.match(refused.text, /refusing to write masked secret\(s\) at config\.headers\[0\]\.value, config\.headers\[1\]\.value/);
+    assert.match(refused.text, /refusing to write masked secret\(s\) at config\.headers\[1\]\.value:/);
     const hatch = await callRaw("call_system_api", {
       method: "PATCH",
       path: "system/service/24",
       body: { config: { parameters: svc.config.parameters } },
     });
     assert.equal(hatch.isError, true, hatch.text);
+    const optionsBack = await callRaw("update_service", {
+      id_or_name: "24",
+      patch: { config: { options: svc.config.options } },
+    });
+    assert.equal(optionsBack.isError, true, optionsBack.text);
+    assert.match(optionsBack.text, /config\.options\.CURLOPT_PROXY/);
     assert.equal(mock.seen.length, seenBefore, "a refused write must never reach DreamFactory");
 
     // Real values (or leaving the lists out) still go through.

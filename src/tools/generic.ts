@@ -22,10 +22,11 @@ export function registerGenericTools(server: McpServer, opts?: RegisterToolOptio
       "Paths are relative to /api/v2 and MUST begin with 'system/' or 'user/'. Provide query as a flat object of " +
       "string values (do NOT embed '?' in path); provide body as a JSON object for POST/PATCH. Returns the DreamFactory " +
       "response, except that every `api_key` field at any depth is masked (null, plus an `api_key_hint` of \"…\" and the " +
-      "last 4 characters), and secret fields (passwords, client secrets, tokens, license_key, header and parameter " +
-      "values, private lookup values) are replaced with \"**********\". Fields set to \"**********\" in `body` are " +
-      "dropped, so the stored secret stays as it is; a \"**********\" inside a list is refused, because DreamFactory " +
-      "replaces lists as a whole. To mint a key the caller can actually see, use create_app.",
+      "last 4 characters), and secret fields (passwords, client secrets, tokens, license_key, credential headers, " +
+      "parameters and curl options, passwords inside URLs, private lookup values) are replaced with \"**********\". " +
+      "Fields set to \"**********\" directly in `body` or its `config` are dropped, so the stored secret stays as it " +
+      "is; a \"**********\" anywhere deeper or inside a longer string is refused, because DreamFactory stores those " +
+      "values as a whole. To mint a key the caller can actually see, use create_app.",
     {
       method: z.enum(["GET", "POST", "PATCH", "PUT", "DELETE"]).describe("HTTP verb."),
       path: z

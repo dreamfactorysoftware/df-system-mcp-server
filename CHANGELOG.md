@@ -19,16 +19,26 @@ All notable changes to `df-system-mcp-server` are documented here.
 - Credentials stored as name/value entries are masked too. RWS services
   returned `config.headers[].value` (e.g. `Authorization: Basic ...`) and
   `config.parameters[].value` (e.g. `api_key=...`) in the clear, because the
-  secret sits next to a harmless-looking `name`. Every `value` in a `headers`
-  or `parameters` list is now masked, as is any `value` whose sibling `name`
-  looks like a credential (contains auth, token, secret, pass, key, cookie,
-  session, credential, bearer or signature). Properties named
-  `authorization`, `auth` or `cookie` are masked as well.
-- Write requests drop properties whose value is exactly `**********`, so
-  sending back a config read through this server leaves the stored secret
-  unchanged. A `**********` inside a list is refused instead of sent:
-  DreamFactory replaces such lists as a whole (RWS headers and parameters are
-  deleted and recreated on save), so the mask would be stored as the value.
+  secret sits next to a `name`. A `value` is now masked when its sibling
+  `name` looks like a credential (Authorization, Proxy-Authorization, Cookie,
+  Set-Cookie, X-API-Key, or containing auth, token, secret, pass, key,
+  session, credential, bearer, or `sig` at a word start). Other headers and
+  parameters (Accept, limit, ...) stay readable for debugging, and empty
+  values stay empty. Properties named `authorization`, `auth` or `cookie` are
+  masked as well.
+- Curl options (an RWS service's `config.options`) are masked by option name,
+  keyed as `CURLOPT_X`, `X` or the numeric constant: options carrying
+  credentials (USERPWD, PROXYUSERPWD, PASSWORD, KEYPASSWD, XOAUTH2_BEARER,
+  COOKIE, POSTFIELDS, LOGIN_OPTIONS, ...) and the credential lines of
+  HTTPHEADER / PROXYHEADER (`Authorization: **********`). Other options stay
+  readable. A password inside any URL is masked in place
+  (`http://user:**********@proxy:3128`).
+- Write requests drop a property set to exactly `**********` directly on the
+  body or directly in `config`, so sending back a config read through this
+  server leaves the stored secret unchanged. A mask anywhere deeper, or inside
+  a longer string, is refused instead of sent: DreamFactory stores such values
+  whole (RWS headers and parameters are deleted and recreated on save,
+  `options` is one attribute), so the mask would be saved as the value.
 
 ### Added
 - `MCP_EXPOSE_SECRETS=true` turns secret masking off.

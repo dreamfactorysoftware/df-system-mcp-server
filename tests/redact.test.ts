@@ -10,12 +10,12 @@ import {
   isSecretEntryName,
   isSecretKey,
   maskApiKeys,
-  maskedPathsInArrays,
   maskResult,
   maskSecrets,
   SECRET_MASK,
   secretsExposed,
   stripMaskedSecrets,
+  unwritableMaskPaths,
 } from "../src/redact";
 
 const KEY = "36fda24fe5588fa4285ac6c6c2fdfbdb6b6bc9834699774c9bf777f706d05a88";
@@ -192,17 +192,20 @@ test("maskSecrets: private lookup values, api_key left to maskApiKeys", () => {
   });
 });
 
-test("maskSecrets: every header and parameter value is masked, names stay readable", () => {
+test("maskSecrets: header and parameter values are masked only for credential names", () => {
   const out = maskSecrets(
     {
       config: {
         base_url: "https://api.example.com",
         headers: [
           { id: 13, name: "Accept", value: "application/json", pass_from_client: false },
+          { id: 14, name: "X-Custom-Header", value: "reports", pass_from_client: false },
           { id: 15, name: "Authorization", value: "Basic dXNlcjpwYXNzd29yZA==", pass_from_client: false },
+          { id: 16, name: "X-Hub-Signature", value: "sha256=abc", pass_from_client: false },
         ],
         parameters: [
           { id: 9, name: "limit", value: "10", outbound: true },
+          { id: 10, name: "sort", value: "", outbound: true },
           { id: 11, name: "api_key", value: "abc123", outbound: true },
           { id: 12, name: "page", value: 2 },
         ],
@@ -214,11 +217,14 @@ test("maskSecrets: every header and parameter value is masked, names stay readab
     config: {
       base_url: "https://api.example.com",
       headers: [
-        { id: 13, name: "Accept", value: SECRET_MASK, pass_from_client: false },
+        { id: 13, name: "Accept", value: "application/json", pass_from_client: false },
+        { id: 14, name: "X-Custom-Header", value: "reports", pass_from_client: false },
         { id: 15, name: "Authorization", value: SECRET_MASK, pass_from_client: false },
+        { id: 16, name: "X-Hub-Signature", value: SECRET_MASK, pass_from_client: false },
       ],
       parameters: [
-        { id: 9, name: "limit", value: SECRET_MASK, outbound: true },
+        { id: 9, name: "limit", value: "10", outbound: true },
+        { id: 10, name: "sort", value: "", outbound: true },
         { id: 11, name: "api_key", value: SECRET_MASK, outbound: true },
         { id: 12, name: "page", value: 2 },
       ],
@@ -246,17 +252,58 @@ test("maskSecrets: a credential-looking entry name masks its value anywhere; hea
     ],
     custom_headers: { Authorization: SECRET_MASK, Accept: "text/plain" },
   });
-  for (const n of ["Authorization", "Proxy-Authorization", "Cookie", "x-api-key", "access_token", "client-secret", "db_pass"]) {
+  for (const n of [
+    "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "x-api-key", "access_token", "client-secret",
+    "db_pass", "password", "X-Hub-Signature", "sig", "aws_sig_v4",
+  ]) {
     assert.equal(isSecretEntryName(n), true, n);
   }
-  for (const n of ["Accept", "Content-Type", "limit", "Region", null, 5]) {
+  for (const n of ["Accept", "Content-Type", "X-Custom-Header", "limit", "sort", "Region", "design", null, 5]) {
     assert.equal(isSecretEntryName(n), false, String(n));
   }
 });
 
-test("maskedPathsInArrays: masks inside lists are reported, object properties are not", () => {
+test("maskSecrets: curl options mask credential options and header lines; URL passwords are masked in place", () => {
+  const out = maskSecrets(
+    {
+      config: {
+        base_url: "https://svc:pw123@api.example.com/v1",
+        options: {
+          CURLOPT_PROXY: "http://proxyuser:proxypass@proxy.example.com:3128",
+          PROXYUSERPWD: "proxyuser:proxypass",
+          CURLOPT_TIMEOUT: 30,
+          CURLOPT_SSL_VERIFYPEER: false,
+          CURLOPT_USERAGENT: "df-rws",
+          CURLOPT_HTTPHEADER: ["X-Trace: on", "Authorization: Bearer abc", "Cookie: sid=1"],
+          "10005": "user:pw",
+          "10023": ["Proxy-Authorization: Basic eDp5"],
+        },
+      },
+      proxy_url: "http://proxy.example.com:3128",
+    },
+    {},
+  );
+  assert.deepEqual(out, {
+    config: {
+      base_url: `https://svc:${SECRET_MASK}@api.example.com/v1`,
+      options: {
+        CURLOPT_PROXY: `http://proxyuser:${SECRET_MASK}@proxy.example.com:3128`,
+        PROXYUSERPWD: SECRET_MASK,
+        CURLOPT_TIMEOUT: 30,
+        CURLOPT_SSL_VERIFYPEER: false,
+        CURLOPT_USERAGENT: "df-rws",
+        CURLOPT_HTTPHEADER: ["X-Trace: on", `Authorization: ${SECRET_MASK}`, `Cookie: ${SECRET_MASK}`],
+        "10005": SECRET_MASK,
+        "10023": [`Proxy-Authorization: ${SECRET_MASK}`],
+      },
+    },
+    proxy_url: "http://proxy.example.com:3128",
+  });
+});
+
+test("unwritableMaskPaths: masks that can't be dropped to keep the stored secret", () => {
   assert.deepEqual(
-    maskedPathsInArrays({
+    unwritableMaskPaths({
       config: {
         password: SECRET_MASK,
         headers: [
@@ -267,11 +314,26 @@ test("maskedPathsInArrays: masks inside lists are reported, object properties ar
     }),
     ["config.headers[1].value"],
   );
-  assert.deepEqual(maskedPathsInArrays({ config: { password: SECRET_MASK } }), []);
-  assert.deepEqual(maskedPathsInArrays({ resource: [{ config: { password: SECRET_MASK } }] }), [
+  assert.deepEqual(unwritableMaskPaths({ label: "x", password: SECRET_MASK, config: { password: SECRET_MASK } }), []);
+  assert.deepEqual(unwritableMaskPaths({ resource: [{ config: { password: SECRET_MASK } }] }), [
     "resource[0].config.password",
   ]);
-  assert.deepEqual(maskedPathsInArrays(null), []);
+  assert.deepEqual(
+    unwritableMaskPaths({
+      config: {
+        options: {
+          PROXYUSERPWD: SECRET_MASK,
+          CURLOPT_TIMEOUT: 30,
+          CURLOPT_PROXY: `http://u:${SECRET_MASK}@proxy:3128`,
+          CURLOPT_HTTPHEADER: [`Authorization: ${SECRET_MASK}`],
+        },
+      },
+    }),
+    ["config.options.PROXYUSERPWD", "config.options.CURLOPT_PROXY", "config.options.CURLOPT_HTTPHEADER[0]"],
+  );
+  assert.deepEqual(unwritableMaskPaths({ config: { base_url: `https://u:${SECRET_MASK}@api` } }), ["config.base_url"]);
+  assert.deepEqual(unwritableMaskPaths({ nested: { config: { password: SECRET_MASK } } }), ["nested.config.password"]);
+  assert.deepEqual(unwritableMaskPaths(null), []);
 });
 
 test("MCP_EXPOSE_SECRETS=true disables secret masking", () => {

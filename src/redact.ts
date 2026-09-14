@@ -23,22 +23,28 @@
  *    `oauth_client_secret`, cloud email keys). Any property whose name looks
  *    like a secret (see `isSecretKey`) is replaced with DreamFactory's own
  *    protection mask `**********`. Credentials stored as name/value entries are
- *    caught too, because there the secret sits next to a harmless-looking name
- *    (an RWS service's `headers: [{ name: "Authorization", value: "Basic …" }]`):
- *    every `value` in a `headers` or `parameters` list is masked, as is any
- *    `value` whose sibling `name` looks like a credential (`isSecretEntryName`)
- *    or whose record is flagged `private: true` (private lookups). Only
- *    non-empty strings, objects and arrays are replaced; null, numbers and
- *    booleans pass through.
+ *    caught too, where the secret sits next to a name (an RWS service's
+ *    `headers: [{ name: "Authorization", value: "Basic …" }]`): a `value` is
+ *    masked when its sibling `name` looks like a credential
+ *    (`isSecretEntryName`) or its record is flagged `private: true` (private
+ *    lookups). Other entries (Accept, limit, ...) stay readable, because
+ *    debugging a connector depends on them. Curl options (an RWS service's
+ *    `config.options`) are masked by option name: credential options such as
+ *    PROXYUSERPWD, and the credential lines of HTTPHEADER / PROXYHEADER. A
+ *    password inside any URL (`http://user:pass@proxy`) is replaced in place.
+ *    Only non-empty strings, objects and arrays are replaced; null, empty
+ *    strings, numbers and booleans pass through, so an unset value still shows
+ *    as unset.
  *    Set `MCP_EXPOSE_SECRETS=true` to disable (not recommended).
  *
- * The mask is never written back. `stripMaskedSecrets` drops object properties
- * whose value is exactly `**********` from request bodies, so sending back a
- * config read through this server leaves the stored secret unchanged
- * (DreamFactory keeps omitted config properties). A mask inside a list can't be
- * dropped safely: DreamFactory replaces such lists as a whole (RWS headers and
- * parameters are deleted and recreated on save), so `maskedPathsInArrays` finds
- * them and the write is refused instead.
+ * The mask is never written back. `stripMaskedSecrets` drops properties whose
+ * value is exactly `**********` from request bodies, so sending back a config
+ * read through this server leaves the stored secret unchanged: DreamFactory
+ * keeps config attributes that are left out. That only holds for a mask set
+ * directly on the body or directly in a `config` object. Deeper down the
+ * containing value is stored whole (RWS headers and parameters are deleted and
+ * recreated, `options` is one attribute), and a partly masked string can't be
+ * dropped at all, so `unwritableMaskPaths` finds those and the write is refused.
  */
 import type { DreamFactoryResult } from "./types";
 
@@ -113,10 +119,18 @@ export function maskResult(result: DreamFactoryResult, env: NodeJS.ProcessEnv = 
 /** Name segments that mark a secret, matched on the snake_case form of a property name. */
 const SECRET_NAME =
   /(^|_)(pass|passwd|password|passphrase|pwd|secret|private_key|api_key|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
-/** Entry names (header, parameter, lookup) whose `value` is a credential: Authorization, Cookie, X-API-Key, ... */
-const SECRET_ENTRY_NAME = /(auth|token|secret|pass|key|cookie|session|credential|bearer|signature)/i;
-/** Lists whose entries' `value`s are all masked: RWS headers and parameters carry credentials as plain values. */
-const CREDENTIAL_LISTS = new Set(["headers", "parameters"]);
+/**
+ * Entry names (header, parameter, lookup) whose `value` is a credential: Authorization,
+ * Proxy-Authorization, Cookie, Set-Cookie, X-API-Key, and anything containing token, secret,
+ * key, pass(word), session, credential, bearer, or `sig` at a word start (X-Hub-Signature).
+ */
+const SECRET_ENTRY_NAME = /(auth|token|secret|pass|key|cookie|session|credential|bearer|(^|[^a-z])sig)/i;
+/** Curl options (name without CURLOPT_) that carry credentials; COOKIEFILE / COOKIEJAR paths are masked too. */
+const CURL_SECRET_OPTION = /(USERPWD|PASSWD|PASSWORD|BEARER|COOKIE|POSTFIELDS|LOGIN_OPTIONS)/;
+/** Curl options holding "Name: value" header lines. */
+const CURL_HEADER_OPTION = /^(HTTPHEADER|PROXYHEADER)$/;
+/** A password in a URL's userinfo: scheme://user:password@host. */
+const URL_USERINFO = /^([a-z][a-z0-9+.-]*:\/\/[^/@\s:]*):([^/@\s]+)@/i;
 /** Suffixes that describe a secret rather than hold one (token_endpoint, password_policy, secret_type, ...). */
 const DESCRIPTIVE_SUFFIX =
   /_(url|uri|endpoint|ttl|timeout|expires|expire|expiry|expiration|lifetime|length|size|hint|type|name|names|field|fields|header|headers|param|params|policy|required|enabled|disabled|mode|label|description|format|id|ids|count|at|date|time|path|location|method|prefix)$/;
@@ -151,19 +165,72 @@ function isPrivateRecord(src: Record<string, unknown>): boolean {
   return p === true || p === 1 || p === "1" || p === "true";
 }
 
-/** @param credentialEntry the object is a direct entry of a `headers` / `parameters` list */
-function maskSecretsIn(value: unknown, credentialEntry = false): unknown {
-  if (Array.isArray(value)) return value.map((v) => maskSecretsIn(v));
+function maskUrlPassword(s: string): string {
+  return URL_USERINFO.test(s) ? s.replace(URL_USERINFO, `$1:${SECRET_MASK}@`) : s;
+}
+
+function maskHeaderLine(line: unknown): unknown {
+  if (typeof line !== "string") return maskSecretsIn(line);
+  const m = /^\s*([^:]+):\s*(.+)$/.exec(line);
+  return m && isSecretEntryName(m[1]) ? `${m[1].trim()}: ${SECRET_MASK}` : maskUrlPassword(line);
+}
+
+/**
+ * Curl options by name (CURLOPT_X or X) or by numeric constant, as RWS
+ * RemoteWeb::cleanOptions accepts them.
+ */
+function maskCurlOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(options)) {
+    const name = curlOptionName(k);
+    if ((CURL_SECRET_OPTION.test(name) || isSecretKey(k)) && hasSecretValue(v)) {
+      out[k] = SECRET_MASK;
+    } else if (CURL_HEADER_OPTION.test(name) && Array.isArray(v)) {
+      out[k] = v.map(maskHeaderLine);
+    } else {
+      out[k] = maskSecretsIn(v);
+    }
+  }
+  return out;
+}
+
+/** Numeric curl constants for the options above (PHP's CURLOPT_* values). */
+const CURL_OPTION_CODES: Record<string, string> = {
+  "10005": "USERPWD",
+  "10006": "PROXYUSERPWD",
+  "10015": "POSTFIELDS",
+  "10022": "COOKIE",
+  "10023": "HTTPHEADER",
+  "10026": "KEYPASSWD",
+  "10135": "COOKIELIST",
+  "10174": "PASSWORD",
+  "10176": "PROXYPASSWORD",
+  "10205": "TLSAUTH_PASSWORD",
+  "10220": "XOAUTH2_BEARER",
+  "10224": "LOGIN_OPTIONS",
+  "10228": "PROXYHEADER",
+  "10252": "PROXY_TLSAUTH_PASSWORD",
+  "10258": "PROXY_KEYPASSWD",
+};
+
+function curlOptionName(key: string): string {
+  const k = key.trim();
+  return CURL_OPTION_CODES[k] ?? k.toUpperCase().replace(/^CURLOPT_/, "");
+}
+
+function maskSecretsIn(value: unknown): unknown {
+  if (typeof value === "string") return maskUrlPassword(value);
+  if (Array.isArray(value)) return value.map(maskSecretsIn);
   if (value === null || typeof value !== "object") return value;
   const src = value as Record<string, unknown>;
-  const secretEntryValue = credentialEntry || isPrivateRecord(src) || isSecretEntryName(src.name);
+  const secretEntryValue = isPrivateRecord(src) || isSecretEntryName(src.name);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
     const secret = isSecretKey(k) || (k === "value" && secretEntryValue);
     if (secret && hasSecretValue(v)) {
       out[k] = SECRET_MASK;
-    } else if (Array.isArray(v) && CREDENTIAL_LISTS.has(snakeCase(k))) {
-      out[k] = v.map((entry) => maskSecretsIn(entry, true));
+    } else if (k === "options" && v !== null && typeof v === "object" && !Array.isArray(v)) {
+      out[k] = maskCurlOptions(v as Record<string, unknown>);
     } else {
       out[k] = maskSecretsIn(v);
     }
@@ -182,27 +249,39 @@ export function maskSecrets<T>(value: T, env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * Paths (e.g. `config.headers[2].value`) of SECRET_MASK values that sit inside
- * a list, at any depth below it. Dropping those can't keep the stored secret,
- * because DreamFactory replaces a list as a whole, so writes carrying them are
- * refused (see dreamFactoryFetch).
+ * Paths (e.g. `config.headers[2].value`, `config.options.PROXYUSERPWD`) of masks
+ * in a request body that can't be dropped to keep the stored secret, so writes
+ * carrying them are refused (see dreamFactoryFetch):
+ * - a SECRET_MASK anywhere except directly on the body or directly in a
+ *   `config` object, because deeper values (lists such as RWS headers and
+ *   parameters, objects such as `options`) are stored whole
+ * - a string that contains the mask but isn't only the mask
+ *   ("http://user:**********@proxy", "Authorization: **********")
  */
-export function maskedPathsInArrays(value: unknown, path = "", insideList = false): string[] {
-  if (value === SECRET_MASK) return insideList ? [path] : [];
-  if (Array.isArray(value)) {
-    return value.flatMap((v, i) => maskedPathsInArrays(v, `${path}[${i}]`, true));
-  }
-  if (value === null || typeof value !== "object") return [];
-  return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) =>
-    maskedPathsInArrays(v, path ? `${path}.${k}` : k, insideList),
-  );
+export function unwritableMaskPaths(value: unknown): string[] {
+  const out: string[] = [];
+  const visit = (v: unknown, path: string, droppable: boolean): void => {
+    if (typeof v === "string") {
+      if (v === SECRET_MASK ? !droppable : v.includes(SECRET_MASK)) out.push(path);
+    } else if (Array.isArray(v)) {
+      v.forEach((e, i) => visit(e, `${path}[${i}]`, false));
+    } else if (v !== null && typeof v === "object") {
+      // `droppable` for this object's own properties: the body itself, or a `config` directly on it.
+      const own = path === "" || (droppable && /(^|\.)config$/.test(path));
+      for (const [k, child] of Object.entries(v as Record<string, unknown>)) {
+        visit(child, path ? `${path}.${k}` : k, own);
+      }
+    }
+  };
+  if (value !== null && typeof value === "object") visit(value, "", true);
+  return out;
 }
 
 /**
  * Return a copy of a request body without properties whose value is exactly
- * SECRET_MASK, at any depth, so a masked secret is never written back over
- * the real one. Array elements are kept as they are; bodies with a mask inside
- * a list are refused before this runs (maskedPathsInArrays).
+ * SECRET_MASK, so a masked secret is never written back over the real one.
+ * Array elements are kept as they are; bodies with a mask that can't be
+ * dropped safely are refused before this runs (unwritableMaskPaths).
  */
 export function stripMaskedSecrets<T>(value: T): T {
   if (Array.isArray(value)) return value.map(stripMaskedSecrets) as T;
