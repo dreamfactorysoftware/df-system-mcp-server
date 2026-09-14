@@ -12,6 +12,7 @@ const types_js_1 = require("@modelcontextprotocol/sdk/types.js");
 const server_1 = require("./server");
 const tools_1 = require("./tools");
 const dreamfactory_1 = require("./dreamfactory");
+const redact_1 = require("./redact");
 const trust_1 = require("./trust");
 /**
  * Listen address. The MCP_SYSTEM_DAEMON_* names win over generic PORT/HOST, which
@@ -85,6 +86,7 @@ function mergeAuth(prev, next) {
         apiKey: next.apiKey ?? prev?.apiKey,
         baseUrl: prev?.baseUrl ?? next.baseUrl,
         traceId: next.traceId ?? prev?.traceId,
+        secretFields: next.secretFields ?? prev?.secretFields,
     };
 }
 /** True when MCP_INTERNAL_KEY is configured and this request presented it (constant-time). */
@@ -98,7 +100,9 @@ function isOneShot(req) {
 }
 /**
  * Unwrap the PHP proxy envelope on POST bodies:
- *   { "_mcpPayload": <json-rpc>, "_mcpConfig": <service config>, "_mcpAvailableServices": [...] }
+ *   { "_mcpPayload": <json-rpc>, "_mcpConfig": <service config>, "_mcpAvailableServices": [...],
+ *     "_mcpSecretFields": { <service type>: { secret: [...], maps: [...] } } }
+ * `_mcpSecretFields` is optional (df-mcp-server sends it for system_mcp services).
  * Direct-mode clients send the bare JSON-RPC message, which passes through untouched.
  */
 function unwrapEnvelope(body) {
@@ -109,10 +113,11 @@ function unwrapEnvelope(body) {
             return {
                 payload: b._mcpPayload,
                 config: cfg && typeof cfg === "object" ? cfg : undefined,
+                secretFields: (0, redact_1.parseSecretFieldManifest)(b._mcpSecretFields),
             };
         }
     }
-    return { payload: body, config: undefined };
+    return { payload: body, config: undefined, secretFields: undefined };
 }
 /** GET/DELETE carry the service config as a JSON string in X-Mcp-Config. */
 function configFromHeader(req) {
@@ -240,7 +245,7 @@ app.use(["/mcp", "/mcp/:serviceName"], requireInternalKey);
 const handlePost = async (req, res) => {
     const incomingSessionId = req.header("mcp-session-id");
     const serviceName = nonEmpty(req.params.serviceName);
-    const { payload, config } = unwrapEnvelope(req.body);
+    const { payload, config, secretFields } = unwrapEnvelope(req.body);
     try {
         let transport;
         let entry;
@@ -252,11 +257,15 @@ const handlePost = async (req, res) => {
                 sendSessionNotFound(res);
                 return;
             }
+            if (secretFields) {
+                entry.auth = { ...entry.auth, secretFields };
+                (0, dreamfactory_1.setAuthForSession)(incomingSessionId, entry.auth);
+            }
             transport = entry.transport;
         }
         else if ((0, types_js_1.isInitializeRequest)(payload)) {
             // Brand-new session: spin up a fresh transport + McpServer.
-            const auth = extractAuthContext(req);
+            const auth = { ...extractAuthContext(req), ...(secretFields ? { secretFields } : {}) };
             const oneShot = isOneShot(req);
             const t = new streamableHttp_js_1.StreamableHTTPServerTransport({
                 sessionIdGenerator: () => (0, crypto_1.randomUUID)(),

@@ -84,7 +84,7 @@ function registerAppTools(server, opts) {
             },
         });
         // Deliberately NOT masked: the new key is only useful if the caller sees it.
-        return (0, dreamfactory_1.toToolResponse)("create_app", result);
+        return (0, dreamfactory_1.toToolResponse)("create_app", result, { keepApiKeys: true });
     });
 }
 //# sourceMappingURL=app.js.map

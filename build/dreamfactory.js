@@ -120,6 +120,8 @@ async function dreamFactoryFetch(method, path, opts = {}) {
                 parsed = text;
             }
         }
+        // The session's manifest travels with the result so toToolResponse can mask with it.
+        const manifest = auth.secretFields ? { secretFields: auth.secretFields } : {};
         if (!res.ok) {
             // DreamFactory error shape: { error: { code, message, context? } }
             let message = `HTTP ${res.status} ${res.statusText}`;
@@ -134,9 +136,9 @@ async function dreamFactoryFetch(method, path, opts = {}) {
                     message = parsed.message;
                 }
             }
-            return { ok: false, status: res.status, error: message, details: parsed };
+            return { ok: false, status: res.status, error: message, details: parsed, ...manifest };
         }
-        return { ok: true, status: res.status, data: parsed };
+        return { ok: true, status: res.status, data: parsed, ...manifest };
     }
     catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -152,12 +154,15 @@ async function dreamFactoryFetch(method, path, opts = {}) {
  * Convert a DreamFactoryResult into the MCP tool text response shape.
  * Caller should pass a label that describes the operation for error context.
  * Every tool response passes through here, so secret masking (src/redact.ts)
- * is applied centrally; API-key masking stays with the tools that return apps.
+ * is applied centrally, with the session's secret-field manifest when it has
+ * one. API-key hints stay with the tools that return apps; create_app passes
+ * `keepApiKeys` so the key it just minted reaches the caller.
  */
-function toToolResponse(label, result) {
+function toToolResponse(label, result, options = {}) {
+    const mask = { manifest: result.secretFields, keepApiKeys: options.keepApiKeys };
     if (result.ok) {
         return {
-            content: [{ type: "text", text: JSON.stringify((0, redact_1.maskSecrets)(result.data), null, 2) }],
+            content: [{ type: "text", text: JSON.stringify((0, redact_1.maskSecrets)(result.data, process.env, mask), null, 2) }],
         };
     }
     const payload = {
@@ -166,7 +171,7 @@ function toToolResponse(label, result) {
         operation: label,
     };
     if (result.details !== undefined)
-        payload.details = (0, redact_1.maskSecrets)(result.details);
+        payload.details = (0, redact_1.maskSecrets)(result.details, process.env, mask);
     return {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
         isError: true,

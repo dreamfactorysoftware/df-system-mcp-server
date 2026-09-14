@@ -8,6 +8,7 @@ exports.maskApiKeys = maskApiKeys;
 exports.maskResult = maskResult;
 exports.isSecretKey = isSecretKey;
 exports.isSecretEntryName = isSecretEntryName;
+exports.parseSecretFieldManifest = parseSecretFieldManifest;
 exports.maskSecrets = maskSecrets;
 exports.unwritableMaskPaths = unwritableMaskPaths;
 exports.stripMaskedSecrets = stripMaskedSecrets;
@@ -80,7 +81,7 @@ function maskResult(result, env = process.env) {
     return { ...result, details: maskApiKeys(result.details, env) };
 }
 /** Name segments that mark a secret, matched on the snake_case form of a property name. */
-const SECRET_NAME = /(^|_)(pass|passwd|password|passphrase|pwd|secret|private_key|api_key|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
+const SECRET_NAME = /(^|_)(pass|passwd|password|passwords|passphrase|passcode|pwd|secret|secrets|private_key|private_keys|api_key|api_keys|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|tokens|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
 /**
  * Entry names (header, parameter, lookup) whose `value` is a credential: Authorization,
  * Proxy-Authorization, Cookie, Set-Cookie, X-API-Key, and anything containing token, secret,
@@ -101,10 +102,10 @@ function snakeCase(name) {
         .replace(/[-\s.]+/g, "_")
         .toLowerCase();
 }
-/** True when a property name looks like it holds a secret. `api_key` has its own masking. */
+/** True when a property name looks like it holds a secret (`api_key_hint` is the hint, not the key). */
 function isSecretKey(name) {
     const n = snakeCase(name);
-    if (n === exports.API_KEY_FIELD || n === exports.HINT_FIELD)
+    if (n === exports.HINT_FIELD)
         return false;
     if (DESCRIPTIVE_SUFFIX.test(n))
         return false;
@@ -126,9 +127,9 @@ function isPrivateRecord(src) {
 function maskUrlPassword(s) {
     return URL_USERINFO.test(s) ? s.replace(URL_USERINFO, `$1:${exports.SECRET_MASK}@`) : s;
 }
-function maskHeaderLine(line) {
+function maskHeaderLine(line, opts) {
     if (typeof line !== "string")
-        return maskSecretsIn(line);
+        return maskSecretsIn(line, opts);
     const m = /^\s*([^:]+):\s*(.+)$/.exec(line);
     return m && isSecretEntryName(m[1]) ? `${m[1].trim()}: ${exports.SECRET_MASK}` : maskUrlPassword(line);
 }
@@ -136,7 +137,7 @@ function maskHeaderLine(line) {
  * Curl options by name (CURLOPT_X or X) or by numeric constant, as RWS
  * RemoteWeb::cleanOptions accepts them.
  */
-function maskCurlOptions(options) {
+function maskCurlOptions(options, opts) {
     const out = {};
     for (const [k, v] of Object.entries(options)) {
         const name = curlOptionName(k);
@@ -144,10 +145,10 @@ function maskCurlOptions(options) {
             out[k] = exports.SECRET_MASK;
         }
         else if (CURL_HEADER_OPTION.test(name) && Array.isArray(v)) {
-            out[k] = v.map(maskHeaderLine);
+            out[k] = v.map((line) => maskHeaderLine(line, opts));
         }
         else {
-            out[k] = maskSecretsIn(v);
+            out[k] = maskSecretsIn(v, opts);
         }
     }
     return out;
@@ -174,39 +175,105 @@ function curlOptionName(key) {
     const k = key.trim();
     return CURL_OPTION_CODES[k] ?? k.toUpperCase().replace(/^CURLOPT_/, "");
 }
-function maskSecretsIn(value) {
+function isPlainObject(v) {
+    return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+function manifestEntry(manifest, type) {
+    if (!manifest || typeof type !== "string")
+        return undefined;
+    return Object.prototype.hasOwnProperty.call(manifest, type) ? manifest[type] : undefined;
+}
+/** A service type's manifest entry applied to its config: secret fields, and credential-named keys of maps. */
+function maskConfigByManifest(config, entry) {
+    const out = { ...config };
+    for (const field of entry.secret) {
+        if (Object.prototype.hasOwnProperty.call(out, field) && hasSecretValue(out[field]))
+            out[field] = exports.SECRET_MASK;
+    }
+    for (const field of entry.maps) {
+        const map = out[field];
+        if (!isPlainObject(map))
+            continue;
+        const masked = {};
+        for (const [k, v] of Object.entries(map)) {
+            masked[k] = (isSecretEntryName(k) || isSecretKey(k)) && hasSecretValue(v) ? exports.SECRET_MASK : v;
+        }
+        out[field] = masked;
+    }
+    return out;
+}
+function maskSecretsIn(value, opts) {
     if (typeof value === "string")
         return maskUrlPassword(value);
     if (Array.isArray(value))
-        return value.map(maskSecretsIn);
+        return value.map((v) => maskSecretsIn(v, opts));
     if (value === null || typeof value !== "object")
         return value;
-    const src = value;
+    let src = value;
+    const entry = manifestEntry(opts.manifest, src.type);
+    if (entry && isPlainObject(src.config))
+        src = { ...src, config: maskConfigByManifest(src.config, entry) };
     const secretEntryValue = isPrivateRecord(src) || isSecretEntryName(src.name);
     const out = {};
     for (const [k, v] of Object.entries(src)) {
-        const secret = isSecretKey(k) || (k === "value" && secretEntryValue);
+        const secret = (isSecretKey(k) && !(opts.keepApiKeys && k === exports.API_KEY_FIELD)) || (k === "value" && secretEntryValue);
         if (secret && hasSecretValue(v)) {
             out[k] = exports.SECRET_MASK;
         }
-        else if (k === "options" && v !== null && typeof v === "object" && !Array.isArray(v)) {
-            out[k] = maskCurlOptions(v);
+        else if (k === "options" && isPlainObject(v)) {
+            out[k] = maskCurlOptions(v, opts);
         }
         else {
-            out[k] = maskSecretsIn(v);
+            out[k] = maskSecretsIn(v, opts);
         }
     }
     return out;
+}
+/** Caps on a manifest received over the wire, so a caller can't make every response scan unbounded lists. */
+const MANIFEST_MAX_TYPES = 500;
+const MANIFEST_MAX_FIELDS = 200;
+const MANIFEST_MAX_NAME = 128;
+function manifestNames(list) {
+    if (!Array.isArray(list))
+        return [];
+    return list
+        .filter((n) => typeof n === "string" && n.length > 0 && n.length <= MANIFEST_MAX_NAME)
+        .slice(0, MANIFEST_MAX_FIELDS);
+}
+/**
+ * Validate a secret-field manifest from the proxy envelope (`_mcpSecretFields`). Invalid
+ * entries are dropped; returns undefined when nothing usable is left. A manifest only adds
+ * masking, so taking one from a caller can't expose anything.
+ */
+function parseSecretFieldManifest(raw) {
+    if (!isPlainObject(raw))
+        return undefined;
+    const out = Object.create(null);
+    let count = 0;
+    for (const [type, entry] of Object.entries(raw)) {
+        if (count >= MANIFEST_MAX_TYPES)
+            break;
+        if (!isPlainObject(entry) || type.length === 0 || type.length > MANIFEST_MAX_NAME)
+            continue;
+        const secret = manifestNames(entry.secret);
+        const maps = manifestNames(entry.maps);
+        if (secret.length === 0 && maps.length === 0)
+            continue;
+        out[type] = { secret, maps };
+        count++;
+    }
+    return count > 0 ? out : undefined;
 }
 /**
  * Return a copy of `value` with secret-looking properties replaced by
  * SECRET_MASK (see module doc). The input is never mutated. Returns `value`
  * untouched when masking is disabled via `MCP_EXPOSE_SECRETS`.
  */
-function maskSecrets(value, env = process.env) {
+function maskSecrets(value, env = process.env, options = {}) {
     if (secretsExposed(env))
         return value;
-    return maskSecretsIn(value);
+    // MCP_EXPOSE_API_KEYS opts every api_key out, including the ones in service configs.
+    return maskSecretsIn(value, { ...options, keepApiKeys: options.keepApiKeys || apiKeysExposed(env) });
 }
 /**
  * Paths (e.g. `config.headers[2].value`, `config.options.PROXYUSERPWD`) of masks
