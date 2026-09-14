@@ -38,7 +38,8 @@ function registerMetaTools(server, opts) {
         return (0, dreamfactory_1.toToolResponse)("get_service_type_schema", result);
     });
     (0, define_1.defineTool)(server, opts, "get_environment", "Return the DreamFactory environment summary: platform version, server software, available authentication " +
-        "providers, server-side settings, and license details. Useful for: (a) confirming connectivity, " +
+        "providers, server-side settings, and license details (the license key itself is masked as \"**********\"). " +
+        "Useful for: (a) confirming connectivity, " +
         "(b) discovering which DreamFactory edition (OSS/Gold) is running, (c) reading platform configuration " +
         "before deciding what features are usable. Read-only.", {}, async (_args, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);

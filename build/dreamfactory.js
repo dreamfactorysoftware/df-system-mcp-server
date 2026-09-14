@@ -7,6 +7,7 @@ exports.getAuthForSession = getAuthForSession;
 exports.countAuthSessions = countAuthSessions;
 exports.dreamFactoryFetch = dreamFactoryFetch;
 exports.toToolResponse = toToolResponse;
+const redact_1 = require("./redact");
 /**
  * Resolved DreamFactory base URL. Trimmed of any trailing slash. Defaults to
  * DreamFactory on the same host; the Docker image sets http://web/api/v2.
@@ -61,6 +62,7 @@ function buildQuery(query) {
  * - Forwards X-DreamFactory-API-Key / X-DreamFactory-Trace-Id when bound.
  * - Uses the per-session base URL (X-Mcp-Base-Url) when present, else DREAMFACTORY_URL.
  * - Sets Accept: application/json (and Content-Type when a body is present).
+ * - Drops masked secrets ("**********") from the body so they never overwrite real ones.
  * - Never logs the session token.
  * - Returns a uniform { ok, status, data | error } envelope.
  */
@@ -89,7 +91,7 @@ async function dreamFactoryFetch(method, path, opts = {}) {
     let bodyInit;
     if (opts.body !== undefined && opts.body !== null) {
         headers["Content-Type"] = "application/json";
-        bodyInit = JSON.stringify(opts.body);
+        bodyInit = JSON.stringify((0, redact_1.stripMaskedSecrets)(opts.body));
     }
     try {
         const res = await fetch(url, { method, headers, body: bodyInit });
@@ -134,11 +136,13 @@ async function dreamFactoryFetch(method, path, opts = {}) {
 /**
  * Convert a DreamFactoryResult into the MCP tool text response shape.
  * Caller should pass a label that describes the operation for error context.
+ * Every tool response passes through here, so secret masking (src/redact.ts)
+ * is applied centrally; API-key masking stays with the tools that return apps.
  */
 function toToolResponse(label, result) {
     if (result.ok) {
         return {
-            content: [{ type: "text", text: JSON.stringify(result.data, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify((0, redact_1.maskSecrets)(result.data), null, 2) }],
         };
     }
     const payload = {
@@ -147,7 +151,7 @@ function toToolResponse(label, result) {
         operation: label,
     };
     if (result.details !== undefined)
-        payload.details = result.details;
+        payload.details = (0, redact_1.maskSecrets)(result.details);
     return {
         content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
         isError: true,

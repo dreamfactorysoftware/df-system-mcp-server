@@ -40,8 +40,10 @@ function registerServiceTools(server, opts) {
         return (0, dreamfactory_1.toToolResponse)("list_services", result);
     });
     (0, define_1.defineTool)(server, opts, "get_service", "Retrieve a single DreamFactory service by numeric id OR by name. " +
-        "Returns full configuration including the `config` object (credentials, host, port, etc) " +
-        "for that service type. Use this when you need to inspect or copy an existing service's config.", {
+        "Returns full configuration including the `config` object (host, port, database, etc) " +
+        "for that service type. Secret fields (passwords, client secrets, private keys, tokens) come back as " +
+        "\"**********\"; sending that value back in update_service leaves the stored secret unchanged. " +
+        "Use this when you need to inspect or copy an existing service's config.", {
         id_or_name: zod_1.z.string().describe("Numeric id (e.g. \"7\") or service name (e.g. \"mysql-prod\")."),
     }, async ({ id_or_name }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
@@ -89,7 +91,9 @@ function registerServiceTools(server, opts) {
     });
     (0, define_1.defineTool)(server, opts, "update_service", "Patch an existing DreamFactory service. Only the fields you provide in `patch` are modified; " +
         "everything else is left alone. Commonly used to flip `is_active`, change `label`, or update " +
-        "the `config` object (e.g. rotate credentials). Identify the service by numeric id or name.", {
+        "the `config` object (e.g. rotate credentials). To rotate a credential, send the new value; any field set to " +
+        "\"**********\" is dropped before the request, so the stored secret stays as it is. " +
+        "Identify the service by numeric id or name.", {
         id_or_name: zod_1.z.string().describe("Numeric id or service name."),
         patch: zod_1.z
             .record(zod_1.z.unknown())

@@ -6,7 +6,7 @@ exports.buildMcpServer = buildMcpServer;
 const mcp_js_1 = require("@modelcontextprotocol/sdk/server/mcp.js");
 const tools_1 = require("./tools");
 exports.SERVER_NAME = "df-system-mcp";
-exports.SERVER_VERSION = "0.4.0";
+exports.SERVER_VERSION = "0.4.1";
 let warnedCustomTools = false;
 /**
  * Normalise the `disabled_tools` value from a DreamFactory service config into
