@@ -181,10 +181,15 @@ mask (for example SMTP and Active Directory passwords, or an MCP service's `oaut
 Every tool response replaces properties whose names look like secrets with DreamFactory's own
 protection mask, `"**********"`, at any depth:
 
-- names containing `password`, `passphrase`, `passcode`, `secret`, `token`, `private_key`, `api_key`,
-  `license_key`, `app_key`, `encryption_key`, `credentials`, `connection_string` or `dsn` (plurals
-  too), and a property named exactly `key` (camelCase names count too, e.g. `clientSecret`)
-- except descriptive names such as `token_endpoint`, `token_ttl`, `password_policy` or `secret_type`
+- names containing `password`, `passphrase`, `passcode`, `secret`, `token`, `private_key`, `api_key`
+  (or `apikey`), `access_key`, `license_key`, `app_key`, `encryption_key`, `credentials`,
+  `connection_string` or `dsn`, plurals too (camelCase names count too, e.g. `clientSecret`). A bare
+  `key` isn't matched: DreamFactory uses it for key/value descriptors and AWS access key IDs, and the
+  type-aware list below covers configs whose secret is named `key` (Snowflake)
+- except descriptive names such as `token_endpoint`, `token_ttl`, `password_policy` or `secret_type`,
+  and type names in descriptor records (at least two values are type names), such as the environment's
+  login payload `{ "email": "string", "password": "string", "remember_me": "bool" }`; a real value in
+  such a record is still masked
 - `value` on any record whose `name` looks like a credential: Authorization, Proxy-Authorization,
   Cookie, Set-Cookie, X-API-Key, or a name containing `auth`, `token`, `secret`, `pass`, `key`,
   `session`, `credential`, `bearer`, or `sig` at a word start. This covers RWS
@@ -211,6 +216,10 @@ On any record with that `type`, the `secret` fields of its `config` are masked. 
 (user-named key/value maps such as a script service's `config`) are masked when they look like
 credentials (`STRIPE_KEY`, `DB_PASSWORD`). The list only adds masking; a client connecting to the
 daemon directly, without df-mcp-server, gets the name rules above.
+
+`list_service_types` and `get_service_type_schema` return type metadata unmasked. It describes fields
+and holds no instance values, so masking could only corrupt it (the `key` descriptor of key/value fields,
+a placeholder default URL). `call_system_api` masks every response, `system/service_type` included.
 
 Write requests drop a property set to exactly `"**********"` directly on the body or directly in
 `config`, so sending back a config read through this server leaves the stored secret unchanged. A mask

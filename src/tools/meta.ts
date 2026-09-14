@@ -32,7 +32,8 @@ export function registerMetaTools(server: McpServer, opts?: RegisterToolOptions)
         auth,
         query: group ? { group } : undefined,
       });
-      return toToolResponse("list_service_types", result);
+      // Type metadata only (no instance values); masking would corrupt config_schema descriptors.
+      return toToolResponse("list_service_types", result, { unmasked: true });
     },
   );
 
@@ -54,7 +55,8 @@ export function registerMetaTools(server: McpServer, opts?: RegisterToolOptions)
         `system/service_type/${encodeURIComponent(name)}`,
         { auth },
       );
-      return toToolResponse("get_service_type_schema", result);
+      // Type metadata only (no instance values); masking would corrupt config_schema descriptors.
+      return toToolResponse("get_service_type_schema", result, { unmasked: true });
     },
   );
 

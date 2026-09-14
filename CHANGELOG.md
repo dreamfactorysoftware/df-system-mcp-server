@@ -17,6 +17,25 @@ All notable changes to `df-system-mcp-server` are documented here.
   MCP session at initialize. It only adds masking: malformed entries are
   dropped, and without it the name rules still apply.
 
+### Fixed
+- `get_service_type_schema` and `list_service_types` return type metadata
+  unmasked. The masker replaced the `key` descriptor of every key/value field
+  (`"object": { "key": { "label": "Name", "type": "string" }, ... }`, e.g. RWS
+  `options`, database `options` and `attributes`) with `"**********"`,
+  turning an object into a string and hiding how to build those fields before
+  `create_service`. Across all 84 service types on a test instance, that
+  descriptor and a placeholder default URL were the only values masking
+  changed.
+- A property named just `key` is no longer masked by name. It matched those
+  descriptors, and in configs it is either an identifier (AWS access key ID)
+  or covered by the type manifest (Snowflake's private key). A client
+  connecting without df-mcp-server no longer gets a Snowflake `key` masked.
+  `apikey` and `access_key` are added to the masked names.
+- `get_environment` no longer masks the login API descriptors
+  (`authentication.admin.payload.password: "string"`). In a record where at
+  least two values are type names, a secret-named property whose value is a
+  type name stays; any other value in that record is still masked.
+
 ### Security
 - `api_key` in service configs (gcm, openstack, rackspace) was returned in
   the clear, because the name rules skipped `api_key` and left it to the app

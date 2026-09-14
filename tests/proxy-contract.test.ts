@@ -49,6 +49,22 @@ const SERVICE_24_CONFIG = {
     { id: 11, service_id: 24, name: "api_key", value: RWS_PARAM_KEY, exclude: false, outbound: true, cache_key: false, action: 1 },
   ],
 };
+// Shaped like DreamFactory's system/service_type/rws: type metadata, no instance values.
+const SERVICE_TYPE_RWS = {
+  name: "rws",
+  label: "HTTP Service",
+  group: "Remote Service",
+  config_schema: [
+    { name: "base_url", label: "Base URL", type: "text", required: true },
+    {
+      name: "options",
+      label: "CURL Options",
+      type: "object",
+      object: { key: { label: "Name", type: "string" }, value: { label: "Value", type: "string" } },
+    },
+    { name: "proxy", label: "Proxy", type: "string", default: "http://username:password@proxy:3128" },
+  ],
+};
 const GCM_API_KEY = "AIzaSyMockGcmServerKey0123456789abcdef";
 const GCM_CERTIFICATE = "-----BEGIN PRIVATE KEY-----MIIEmockcertificatecontent";
 const SCRIPT_STRIPE_KEY = "sk_live_mock_stripe_0123456789";
@@ -185,11 +201,21 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
             app_by_role_id: [{ id: 4, name: "reporting_app", api_key: APP_KEY_A }],
           }),
         );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service_type")) {
+        const single = url.startsWith("/api/v2/system/service_type/");
+        res.end(JSON.stringify(single ? SERVICE_TYPE_RWS : { resource: [SERVICE_TYPE_RWS] }));
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/environment")) {
         res.end(
           JSON.stringify({
             platform: { version: "7.7.0", license: "GOLD", license_key: LICENSE_KEY },
             server: { host_os: "linux" },
+            authentication: {
+              admin: {
+                path: "system/admin/session",
+                verb: "POST",
+                payload: { email: "string", password: "string", remember_me: "bool" },
+              },
+            },
           }),
         );
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/24")) {
@@ -660,6 +686,11 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     const env = JSON.parse(envText);
     assert.equal(env.platform.license_key, "**********");
     assert.equal(env.platform.license, "GOLD", "non-secret license details stay readable");
+    assert.deepEqual(
+      env.authentication.admin.payload,
+      { email: "string", password: "string", remember_me: "bool" },
+      "login payload descriptors are not credentials",
+    );
     noSecrets(await call("call_system_api", { method: "GET", path: "system/environment" }), "call_system_api environment");
     noSecrets(await call("list_services", {}), "list_services");
 
@@ -780,6 +811,30 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal(mock.seen.length, seenBefore + 1);
     assert.equal(mock.seen[seenBefore].method, "PATCH");
     noRwsSecrets(ok.text, "update_service rws response");
+  });
+
+  await t.test("service type tools return schema metadata unmasked; call_system_api keeps descriptors intact", async () => {
+    const sid = await openSession(baseUrl);
+    let id = 850;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const rid = ++id;
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id: rid, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, rid);
+      assert.notEqual(result.isError, true, `${name}: ${JSON.stringify(result)}`);
+      return JSON.parse((result.content as { text: string }[])[0].text);
+    };
+
+    assert.deepEqual(await call("get_service_type_schema", { name: "rws" }), SERVICE_TYPE_RWS);
+    assert.deepEqual((await call("list_service_types", {})).resource, [SERVICE_TYPE_RWS]);
+
+    // The generic escape hatch still masks, but a key/value descriptor is not a secret name.
+    const viaApi = await call("call_system_api", { method: "GET", path: "system/service_type/rws" });
+    assert.deepEqual(viaApi.config_schema[1].object.key, { label: "Name", type: "string" });
+    assert.equal(viaApi.config_schema[2].default, "http://username:**********@proxy:3128");
   });
 
   await t.test("secret-field manifest from the envelope masks type-specific fields for the whole session", async () => {

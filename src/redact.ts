@@ -44,6 +44,8 @@
  *    it the name rules still apply. `api_key` is masked here too, because
  *    service configs (gcm, rackspace, ...) carry one; the app tools mask it
  *    with a hint first, and `create_app` keeps it.
+ *    The service type tools skip this layer: type metadata describes fields and
+ *    holds no instance values, so masking it only corrupted descriptors.
  *    Set `MCP_EXPOSE_SECRETS=true` to disable (not recommended).
  *
  * The mask is never written back. `stripMaskedSecrets` drops properties whose
@@ -127,7 +129,7 @@ export function maskResult(result: DreamFactoryResult, env: NodeJS.ProcessEnv = 
 
 /** Name segments that mark a secret, matched on the snake_case form of a property name. */
 const SECRET_NAME =
-  /(^|_)(pass|passwd|password|passwords|passphrase|passcode|pwd|secret|secrets|private_key|private_keys|api_key|api_keys|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|tokens|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
+  /(^|_)(pass|passwd|password|passwords|passphrase|passcode|pwd|secret|secrets|private_key|private_keys|api_key|api_keys|apikey|apikeys|access_key|access_keys|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|tokens|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
 /**
  * Entry names (header, parameter, lookup) whose `value` is a credential: Authorization,
  * Proxy-Authorization, Cookie, Set-Cookie, X-API-Key, and anything containing token, secret,
@@ -151,12 +153,16 @@ function snakeCase(name: string): string {
     .toLowerCase();
 }
 
-/** True when a property name looks like it holds a secret (`api_key_hint` is the hint, not the key). */
+/**
+ * True when a property name looks like it holds a secret (`api_key_hint` is the hint, not the key).
+ * A bare `key` doesn't count: DreamFactory uses it for the key half of key/value descriptors and
+ * for identifiers (an AWS access key ID), and the manifest covers configs whose secret is `key`.
+ */
 export function isSecretKey(name: string): boolean {
   const n = snakeCase(name);
   if (n === HINT_FIELD) return false;
   if (DESCRIPTIVE_SUFFIX.test(n)) return false;
-  return n === "key" || SECRET_NAME.test(n);
+  return SECRET_NAME.test(n);
 }
 
 /** True when a name/value entry's name marks its `value` as a credential. */
@@ -245,7 +251,7 @@ function manifestEntry(manifest: SecretFieldManifest | undefined, type: unknown)
 }
 
 /** A service type's manifest entry applied to its config: secret fields, and credential-named keys of maps. */
-function maskConfigByManifest(config: Record<string, unknown>, entry: SecretFieldEntry): Record<string, unknown> {
+export function maskConfigByManifest(config: Record<string, unknown>, entry: SecretFieldEntry): Record<string, unknown> {
   const out: Record<string, unknown> = { ...config };
   for (const field of entry.secret) {
     if (Object.prototype.hasOwnProperty.call(out, field) && hasSecretValue(out[field])) out[field] = SECRET_MASK;
@@ -262,6 +268,20 @@ function maskConfigByManifest(config: Record<string, unknown>, entry: SecretFiel
   return out;
 }
 
+/** Type names, as descriptors use them (the environment's login payloads: `{ "password": "string" }`). */
+const TYPE_NAME = /^(string|text|bool|boolean|int|integer|number|float|double|array|object|date|datetime|timestamp)$/;
+
+function isTypeName(v: unknown): boolean {
+  return typeof v === "string" && TYPE_NAME.test(v);
+}
+
+/** A record that describes fields rather than holding values: at least two of its values are type names. */
+function isTypeDescriptorRecord(src: Record<string, unknown>): boolean {
+  let names = 0;
+  for (const v of Object.values(src)) if (isTypeName(v) && ++names >= 2) return true;
+  return false;
+}
+
 function maskSecretsIn(value: unknown, opts: MaskOptions): unknown {
   if (typeof value === "string") return maskUrlPassword(value);
   if (Array.isArray(value)) return value.map((v) => maskSecretsIn(v, opts));
@@ -270,11 +290,13 @@ function maskSecretsIn(value: unknown, opts: MaskOptions): unknown {
   const entry = manifestEntry(opts.manifest, src.type);
   if (entry && isPlainObject(src.config)) src = { ...src, config: maskConfigByManifest(src.config, entry) };
   const secretEntryValue = isPrivateRecord(src) || isSecretEntryName(src.name);
+  // In a descriptor record a type name is a description, not a value; anything else is still masked.
+  const descriptor = isTypeDescriptorRecord(src);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
     const secret =
       (isSecretKey(k) && !(opts.keepApiKeys && k === API_KEY_FIELD)) || (k === "value" && secretEntryValue);
-    if (secret && hasSecretValue(v)) {
+    if (secret && hasSecretValue(v) && !(descriptor && isTypeName(v))) {
       out[k] = SECRET_MASK;
     } else if (k === "options" && isPlainObject(v)) {
       out[k] = maskCurlOptions(v, opts);

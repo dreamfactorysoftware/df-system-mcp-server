@@ -114,16 +114,47 @@ test("isSecretKey: secret-looking names, including camelCase", () => {
     "password", "PASSWORD", "db_password", "passphrase", "private_key_passphrase", "secret", "client_secret",
     "oauth_client_secret", "clientSecret", "aws_secret_access_key", "private_key", "privateKey", "license_key",
     "app_key", "encryption_key", "token", "access_token", "refresh_token", "session_token", "credentials",
-    "connection_string", "dsn", "key", "openai_api_key", "Authorization", "Proxy-Authorization", "Cookie",
+    "connection_string", "dsn", "openai_api_key", "Authorization", "Proxy-Authorization", "Cookie",
     "Set-Cookie", "X-Api-Key", "auth", "api_key", "api_keys", "data_chat_api_keys", "passcode", "tokens",
+    "apikey", "apiKey", "access_key", "storage_access_key",
   ];
   for (const k of secret) assert.equal(isSecretKey(k), true, k);
   const notSecret = [
-    "api_key_hint", "token_endpoint", "token_ttl", "session_token_ttl", "password_policy",
+    "key", "access_key_id", "sort_key", "api_key_hint", "token_endpoint", "token_ttl", "session_token_ttl", "password_policy",
     "password_required", "secret_type", "oauth_client_id", "username", "host", "name", "keyboard", "monkey",
     "key_name", "primary_key", "license", "author", "auth_type", "Accept",
   ];
   for (const k of notSecret) assert.equal(isSecretKey(k), false, k);
+});
+
+test("maskSecrets: key/value descriptors keep their shape; a bare key is not a secret name", () => {
+  // As in DreamFactory's rws / mysql config_schema: `key` describes the key half of each pair.
+  const options = {
+    name: "options",
+    type: "object",
+    object: { key: { label: "Name", type: "string" }, value: { label: "Value", type: "string" } },
+  };
+  assert.deepEqual(maskSecrets({ config_schema: [options] }, {}), { config_schema: [options] });
+  assert.deepEqual(maskSecrets({ key: "AKIAEXAMPLE", secret: "s3cr3t" }, {}), { key: "AKIAEXAMPLE", secret: SECRET_MASK });
+});
+
+test("maskSecrets: type descriptors keep their type names; real values beside them are still masked", () => {
+  // DreamFactory's system/environment login APIs (df-system Environment::getLoginApi).
+  const authentication = {
+    admin: { path: "system/admin/session", verb: "POST", payload: { email: "string", password: "string", remember_me: "bool" } },
+    ldap: {
+      path: "user/session?service=ldap",
+      verb: "POST",
+      payload: { username: "string", password: "string", service: "ldap", remember_me: "bool" },
+    },
+  };
+  assert.deepEqual(maskSecrets({ authentication }, {}), { authentication });
+  assert.deepEqual(maskSecrets({ username: "string", password: "hunter2", remember_me: "bool" }, {}), {
+    username: "string",
+    password: SECRET_MASK,
+    remember_me: "bool",
+  });
+  assert.deepEqual(maskSecrets({ host: "db", password: "string" }, {}), { host: "db", password: SECRET_MASK }, "one type name is not a descriptor");
 });
 
 test("maskSecrets: environment license_key, service config credentials, nested and in arrays", () => {
@@ -218,6 +249,7 @@ test("maskSecrets with a manifest: type-specific secret fields and user-named ma
   const plain = maskSecrets(records, {}) as typeof records;
   assert.equal(plain.resource[0].config.certificate, "-----BEGIN PRIVATE KEY-----x");
   assert.equal((plain.resource[2].config.config as Record<string, string>).STRIPE_KEY, "sk_live_x");
+  assert.equal(plain.resource[1].config.key, "pem", "a secret named just `key` is the manifest's job");
 });
 
 test("parseSecretFieldManifest: keeps valid entries, drops junk, can't reach the prototype", () => {
