@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import {
   apiKeyHint,
   apiKeysExposed,
+  isSecretEntryName,
   isSecretKey,
   maskApiKeys,
+  maskedPathsInArrays,
   maskResult,
   maskSecrets,
   SECRET_MASK,
@@ -111,13 +113,14 @@ test("isSecretKey: secret-looking names, including camelCase", () => {
     "password", "PASSWORD", "db_password", "passphrase", "private_key_passphrase", "secret", "client_secret",
     "oauth_client_secret", "clientSecret", "aws_secret_access_key", "private_key", "privateKey", "license_key",
     "app_key", "encryption_key", "token", "access_token", "refresh_token", "session_token", "credentials",
-    "connection_string", "dsn", "key", "openai_api_key",
+    "connection_string", "dsn", "key", "openai_api_key", "Authorization", "Proxy-Authorization", "Cookie",
+    "Set-Cookie", "X-Api-Key", "auth",
   ];
   for (const k of secret) assert.equal(isSecretKey(k), true, k);
   const notSecret = [
     "api_key", "api_key_hint", "token_endpoint", "token_ttl", "session_token_ttl", "password_policy",
     "password_required", "secret_type", "oauth_client_id", "username", "host", "name", "keyboard", "monkey",
-    "key_name", "primary_key", "license",
+    "key_name", "primary_key", "license", "author", "auth_type", "Accept",
   ];
   for (const k of notSecret) assert.equal(isSecretKey(k), false, k);
 });
@@ -187,6 +190,88 @@ test("maskSecrets: private lookup values, api_key left to maskApiKeys", () => {
     ],
     app: { api_key: KEY },
   });
+});
+
+test("maskSecrets: every header and parameter value is masked, names stay readable", () => {
+  const out = maskSecrets(
+    {
+      config: {
+        base_url: "https://api.example.com",
+        headers: [
+          { id: 13, name: "Accept", value: "application/json", pass_from_client: false },
+          { id: 15, name: "Authorization", value: "Basic dXNlcjpwYXNzd29yZA==", pass_from_client: false },
+        ],
+        parameters: [
+          { id: 9, name: "limit", value: "10", outbound: true },
+          { id: 11, name: "api_key", value: "abc123", outbound: true },
+          { id: 12, name: "page", value: 2 },
+        ],
+      },
+    },
+    {},
+  );
+  assert.deepEqual(out, {
+    config: {
+      base_url: "https://api.example.com",
+      headers: [
+        { id: 13, name: "Accept", value: SECRET_MASK, pass_from_client: false },
+        { id: 15, name: "Authorization", value: SECRET_MASK, pass_from_client: false },
+      ],
+      parameters: [
+        { id: 9, name: "limit", value: SECRET_MASK, outbound: true },
+        { id: 11, name: "api_key", value: SECRET_MASK, outbound: true },
+        { id: 12, name: "page", value: 2 },
+      ],
+    },
+  });
+});
+
+test("maskSecrets: a credential-looking entry name masks its value anywhere; header maps by key name", () => {
+  const out = maskSecrets(
+    {
+      resource: [
+        { name: "X-API-KEY", value: "k" },
+        { name: "session_cookie", value: "c" },
+        { name: "Region", value: "us-east-1" },
+      ],
+      custom_headers: { Authorization: "Bearer abc", Accept: "text/plain" },
+    },
+    {},
+  );
+  assert.deepEqual(out, {
+    resource: [
+      { name: "X-API-KEY", value: SECRET_MASK },
+      { name: "session_cookie", value: SECRET_MASK },
+      { name: "Region", value: "us-east-1" },
+    ],
+    custom_headers: { Authorization: SECRET_MASK, Accept: "text/plain" },
+  });
+  for (const n of ["Authorization", "Proxy-Authorization", "Cookie", "x-api-key", "access_token", "client-secret", "db_pass"]) {
+    assert.equal(isSecretEntryName(n), true, n);
+  }
+  for (const n of ["Accept", "Content-Type", "limit", "Region", null, 5]) {
+    assert.equal(isSecretEntryName(n), false, String(n));
+  }
+});
+
+test("maskedPathsInArrays: masks inside lists are reported, object properties are not", () => {
+  assert.deepEqual(
+    maskedPathsInArrays({
+      config: {
+        password: SECRET_MASK,
+        headers: [
+          { name: "Accept", value: "application/json" },
+          { name: "Authorization", value: SECRET_MASK },
+        ],
+      },
+    }),
+    ["config.headers[1].value"],
+  );
+  assert.deepEqual(maskedPathsInArrays({ config: { password: SECRET_MASK } }), []);
+  assert.deepEqual(maskedPathsInArrays({ resource: [{ config: { password: SECRET_MASK } }] }), [
+    "resource[0].config.password",
+  ]);
+  assert.deepEqual(maskedPathsInArrays(null), []);
 });
 
 test("MCP_EXPOSE_SECRETS=true disables secret masking", () => {

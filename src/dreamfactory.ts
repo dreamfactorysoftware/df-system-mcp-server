@@ -1,4 +1,4 @@
-import { maskSecrets, stripMaskedSecrets } from "./redact";
+import { maskedPathsInArrays, maskSecrets, stripMaskedSecrets } from "./redact";
 import type {
   AuthContext,
   DreamFactoryFetchOptions,
@@ -64,7 +64,8 @@ function buildQuery(query?: Record<string, string | number | boolean | undefined
  * - Forwards X-DreamFactory-API-Key / X-DreamFactory-Trace-Id when bound.
  * - Uses the per-session base URL (X-Mcp-Base-Url) when present, else DREAMFACTORY_URL.
  * - Sets Accept: application/json (and Content-Type when a body is present).
- * - Drops masked secrets ("**********") from the body so they never overwrite real ones.
+ * - Drops masked secrets ("**********") from the body so they never overwrite real ones, and
+ *   refuses a body with a mask inside a list, which DreamFactory would store as the value.
  * - Never logs the session token.
  * - Returns a uniform { ok, status, data | error } envelope.
  */
@@ -82,6 +83,21 @@ export async function dreamFactoryFetch(
         "authentication required: no DreamFactory session token bound to this MCP session. " +
         "Send X-DreamFactory-Session-Token (or Authorization: Bearer ...) on the MCP HTTP request.",
     };
+  }
+
+  if (opts.body !== undefined && opts.body !== null) {
+    const maskedInLists = maskedPathsInArrays(opts.body);
+    if (maskedInLists.length > 0) {
+      const shown = maskedInLists.slice(0, 5).join(", ") + (maskedInLists.length > 5 ? ", ..." : "");
+      return {
+        ok: false,
+        status: 400,
+        error:
+          `refusing to write masked secret(s) at ${shown}: DreamFactory replaces lists such as RWS headers and ` +
+          'parameters as a whole, so "**********" would be stored as the value. Send the real values, or leave ' +
+          "that list out of the request to keep the stored one.",
+      };
+    }
   }
 
   const base = (auth.baseUrl && auth.baseUrl.replace(/\/+$/, "")) || getBaseUrl();

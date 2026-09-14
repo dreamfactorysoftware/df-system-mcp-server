@@ -22,15 +22,23 @@
  *    doesn't mark protected (SMTP and AD passwords, the MCP service's
  *    `oauth_client_secret`, cloud email keys). Any property whose name looks
  *    like a secret (see `isSecretKey`) is replaced with DreamFactory's own
- *    protection mask `**********`, and so is `value` on records flagged
- *    `private: true` (private lookups). Only non-empty strings, objects and
- *    arrays are replaced; null, numbers and booleans pass through.
+ *    protection mask `**********`. Credentials stored as name/value entries are
+ *    caught too, because there the secret sits next to a harmless-looking name
+ *    (an RWS service's `headers: [{ name: "Authorization", value: "Basic …" }]`):
+ *    every `value` in a `headers` or `parameters` list is masked, as is any
+ *    `value` whose sibling `name` looks like a credential (`isSecretEntryName`)
+ *    or whose record is flagged `private: true` (private lookups). Only
+ *    non-empty strings, objects and arrays are replaced; null, numbers and
+ *    booleans pass through.
  *    Set `MCP_EXPOSE_SECRETS=true` to disable (not recommended).
  *
- * The mask is never written back: `stripMaskedSecrets` drops properties whose
- * value is exactly `**********` from request bodies, so sending back a config
- * read through this server leaves the stored secret unchanged. DreamFactory only
- * ignores the mask itself for fields its models protect.
+ * The mask is never written back. `stripMaskedSecrets` drops object properties
+ * whose value is exactly `**********` from request bodies, so sending back a
+ * config read through this server leaves the stored secret unchanged
+ * (DreamFactory keeps omitted config properties). A mask inside a list can't be
+ * dropped safely: DreamFactory replaces such lists as a whole (RWS headers and
+ * parameters are deleted and recreated on save), so `maskedPathsInArrays` finds
+ * them and the write is refused instead.
  */
 import type { DreamFactoryResult } from "./types";
 
@@ -104,7 +112,11 @@ export function maskResult(result: DreamFactoryResult, env: NodeJS.ProcessEnv = 
 
 /** Name segments that mark a secret, matched on the snake_case form of a property name. */
 const SECRET_NAME =
-  /(^|_)(pass|passwd|password|passphrase|pwd|secret|private_key|api_key|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|credential|credentials|connection_string|dsn)($|_)/;
+  /(^|_)(pass|passwd|password|passphrase|pwd|secret|private_key|api_key|license_key|licence_key|app_key|encryption_key|signing_key|master_key|account_key|token|credential|credentials|connection_string|dsn|authorization|auth|cookie)($|_)/;
+/** Entry names (header, parameter, lookup) whose `value` is a credential: Authorization, Cookie, X-API-Key, ... */
+const SECRET_ENTRY_NAME = /(auth|token|secret|pass|key|cookie|session|credential|bearer|signature)/i;
+/** Lists whose entries' `value`s are all masked: RWS headers and parameters carry credentials as plain values. */
+const CREDENTIAL_LISTS = new Set(["headers", "parameters"]);
 /** Suffixes that describe a secret rather than hold one (token_endpoint, password_policy, secret_type, ...). */
 const DESCRIPTIVE_SUFFIX =
   /_(url|uri|endpoint|ttl|timeout|expires|expire|expiry|expiration|lifetime|length|size|hint|type|name|names|field|fields|header|headers|param|params|policy|required|enabled|disabled|mode|label|description|format|id|ids|count|at|date|time|path|location|method|prefix)$/;
@@ -124,6 +136,11 @@ export function isSecretKey(name: string): boolean {
   return n === "key" || SECRET_NAME.test(n);
 }
 
+/** True when a name/value entry's name marks its `value` as a credential. */
+export function isSecretEntryName(name: unknown): boolean {
+  return typeof name === "string" && SECRET_ENTRY_NAME.test(name);
+}
+
 function hasSecretValue(v: unknown): boolean {
   if (typeof v === "string") return v.length > 0 && v !== SECRET_MASK;
   return v !== null && typeof v === "object";
@@ -134,15 +151,22 @@ function isPrivateRecord(src: Record<string, unknown>): boolean {
   return p === true || p === 1 || p === "1" || p === "true";
 }
 
-function maskSecretsIn(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(maskSecretsIn);
+/** @param credentialEntry the object is a direct entry of a `headers` / `parameters` list */
+function maskSecretsIn(value: unknown, credentialEntry = false): unknown {
+  if (Array.isArray(value)) return value.map((v) => maskSecretsIn(v));
   if (value === null || typeof value !== "object") return value;
   const src = value as Record<string, unknown>;
-  const privateRecord = isPrivateRecord(src);
+  const secretEntryValue = credentialEntry || isPrivateRecord(src) || isSecretEntryName(src.name);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
-    const secret = isSecretKey(k) || (privateRecord && k === "value");
-    out[k] = secret && hasSecretValue(v) ? SECRET_MASK : maskSecretsIn(v);
+    const secret = isSecretKey(k) || (k === "value" && secretEntryValue);
+    if (secret && hasSecretValue(v)) {
+      out[k] = SECRET_MASK;
+    } else if (Array.isArray(v) && CREDENTIAL_LISTS.has(snakeCase(k))) {
+      out[k] = v.map((entry) => maskSecretsIn(entry, true));
+    } else {
+      out[k] = maskSecretsIn(v);
+    }
   }
   return out;
 }
@@ -158,9 +182,27 @@ export function maskSecrets<T>(value: T, env: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
+ * Paths (e.g. `config.headers[2].value`) of SECRET_MASK values that sit inside
+ * a list, at any depth below it. Dropping those can't keep the stored secret,
+ * because DreamFactory replaces a list as a whole, so writes carrying them are
+ * refused (see dreamFactoryFetch).
+ */
+export function maskedPathsInArrays(value: unknown, path = "", insideList = false): string[] {
+  if (value === SECRET_MASK) return insideList ? [path] : [];
+  if (Array.isArray(value)) {
+    return value.flatMap((v, i) => maskedPathsInArrays(v, `${path}[${i}]`, true));
+  }
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value as Record<string, unknown>).flatMap(([k, v]) =>
+    maskedPathsInArrays(v, path ? `${path}.${k}` : k, insideList),
+  );
+}
+
+/**
  * Return a copy of a request body without properties whose value is exactly
  * SECRET_MASK, at any depth, so a masked secret is never written back over
- * the real one. Array elements are kept as they are.
+ * the real one. Array elements are kept as they are; bodies with a mask inside
+ * a list are refused before this runs (maskedPathsInArrays).
  */
 export function stripMaskedSecrets<T>(value: T): T {
   if (Array.isArray(value)) return value.map(stripMaskedSecrets) as T;

@@ -52,8 +52,10 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
     "get_service",
     "Retrieve a single DreamFactory service by numeric id OR by name. " +
       "Returns full configuration including the `config` object (host, port, database, etc) " +
-      "for that service type. Secret fields (passwords, client secrets, private keys, tokens) come back as " +
-      "\"**********\"; sending that value back in update_service leaves the stored secret unchanged. " +
+      "for that service type. Secret fields (passwords, client secrets, private keys, tokens) and every header or " +
+      "parameter `value` (RWS services) come back as \"**********\". Sending a masked field back in update_service " +
+      "leaves the stored secret unchanged; headers and parameters are replaced as a whole, so send them with real " +
+      "values or leave them out. " +
       "Use this when you need to inspect or copy an existing service's config.",
     {
       id_or_name: z.string().describe("Numeric id (e.g. \"7\") or service name (e.g. \"mysql-prod\")."),
@@ -127,7 +129,9 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
     "Patch an existing DreamFactory service. Only the fields you provide in `patch` are modified; " +
       "everything else is left alone. Commonly used to flip `is_active`, change `label`, or update " +
       "the `config` object (e.g. rotate credentials). To rotate a credential, send the new value; any field set to " +
-      "\"**********\" is dropped before the request, so the stored secret stays as it is. " +
+      "\"**********\" is dropped before the request, so the stored secret stays as it is. A \"**********\" inside a " +
+      "list (e.g. RWS `headers` or `parameters`, which DreamFactory replaces as a whole) is refused: send the real " +
+      "values, or omit that list to keep it. " +
       "Identify the service by numeric id or name.",
     {
       id_or_name: z.string().describe("Numeric id or service name."),

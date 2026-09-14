@@ -34,6 +34,19 @@ const DB_PASSWORD = "Reporting-Db-Pass-9f8e7d";
 const MCP_OAUTH_SECRET = "5ec2e7a4b1f0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4";
 const PRIVATE_KEY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7mockprivatekey";
 const PRIVATE_LOOKUP_VALUE = "lookup-secret-42";
+const RWS_BASIC_AUTH = "Basic cmVwb3J0czpodW50ZXIy";
+const RWS_PARAM_KEY = "rws-query-api-key-77";
+const SERVICE_24_CONFIG = {
+  base_url: "https://api.example.com/v1",
+  headers: [
+    { id: 13, service_id: 24, name: "Accept", value: "application/json", pass_from_client: false, action: 1 },
+    { id: 15, service_id: 24, name: "Authorization", value: RWS_BASIC_AUTH, pass_from_client: false, action: 1 },
+  ],
+  parameters: [
+    { id: 9, service_id: 24, name: "limit", value: "10", exclude: false, outbound: true, cache_key: false, action: 1 },
+    { id: 11, service_id: 24, name: "api_key", value: RWS_PARAM_KEY, exclude: false, outbound: true, cache_key: false, action: 1 },
+  ],
+};
 const SERVICE_7_CONFIG = {
   host: "smtp.example.com",
   port: 587,
@@ -174,6 +187,10 @@ function startMockDreamFactory(): Promise<{ server: Server; port: number; seen: 
             server: { host_os: "linux" },
           }),
         );
+      } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/24")) {
+        res.end(JSON.stringify({ id: 24, name: "rest-api", type: "rws", config: SERVICE_24_CONFIG }));
+      } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/24")) {
+        res.end(JSON.stringify({ id: 24, name: "rest-api", type: "rws", config: SERVICE_24_CONFIG }));
       } else if (req.method === "GET" && url.startsWith("/api/v2/system/service/7")) {
         res.end(JSON.stringify({ id: 7, name: "mail", type: "smtp_email", config: SERVICE_7_CONFIG }));
       } else if (req.method === "PATCH" && url.startsWith("/api/v2/system/service/7")) {
@@ -643,6 +660,73 @@ test("PHP proxy contract: envelope, header forwarding, internal key, disabled_to
     assert.equal(sentBody.config.password_required, true);
     assert.equal("password" in sentBody.config, false);
     assert.equal("oauth_client_secret" in sentBody.config, false);
+  });
+
+  await t.test("RWS header and parameter values are masked; masked lists are never written", async () => {
+    const sid = await openSession(baseUrl);
+    let id = 500;
+    const callRaw = async (name: string, args: Record<string, unknown>) => {
+      const rid = ++id;
+      const res = await proxyPost(
+        baseUrl,
+        { jsonrpc: "2.0", id: rid, method: "tools/call", params: { name, arguments: args } },
+        { sessionId: sid, internalKey: INTERNAL_KEY },
+      );
+      const result = rpcResult(res.messages, rid);
+      return { isError: result.isError === true, text: (result.content as { text: string }[])[0].text };
+    };
+    const noRwsSecrets = (text: string, label: string) => {
+      assert.ok(!text.includes(RWS_BASIC_AUTH), `${label} leaked the Authorization header`);
+      assert.ok(!text.includes(RWS_BASIC_AUTH.slice(6)), `${label} leaked the base64 credential`);
+      assert.ok(!text.includes(RWS_PARAM_KEY), `${label} leaked the api_key parameter`);
+    };
+
+    const got = await callRaw("get_service", { id_or_name: "24" });
+    assert.equal(got.isError, false, got.text);
+    noRwsSecrets(got.text, "get_service rws");
+    const svc = JSON.parse(got.text);
+    assert.deepEqual(
+      svc.config.headers.map((h: { name: string; value: string }) => [h.name, h.value]),
+      [
+        ["Accept", "**********"],
+        ["Authorization", "**********"],
+      ],
+    );
+    assert.deepEqual(
+      svc.config.parameters.map((p: { name: string; value: string }) => [p.name, p.value]),
+      [
+        ["limit", "**********"],
+        ["api_key", "**********"],
+      ],
+    );
+    assert.equal(svc.config.base_url, "https://api.example.com/v1");
+    noRwsSecrets((await callRaw("call_system_api", { method: "GET", path: "system/service/24" })).text, "call_system_api rws");
+
+    // Sending the masked headers back would replace the stored list with "**********" values: refused, never sent.
+    const seenBefore = mock.seen.length;
+    const refused = await callRaw("update_service", {
+      id_or_name: "24",
+      patch: { config: { headers: svc.config.headers } },
+    });
+    assert.equal(refused.isError, true, refused.text);
+    assert.match(refused.text, /refusing to write masked secret\(s\) at config\.headers\[0\]\.value, config\.headers\[1\]\.value/);
+    const hatch = await callRaw("call_system_api", {
+      method: "PATCH",
+      path: "system/service/24",
+      body: { config: { parameters: svc.config.parameters } },
+    });
+    assert.equal(hatch.isError, true, hatch.text);
+    assert.equal(mock.seen.length, seenBefore, "a refused write must never reach DreamFactory");
+
+    // Real values (or leaving the lists out) still go through.
+    const ok = await callRaw("update_service", {
+      id_or_name: "24",
+      patch: { label: "REST API", config: { headers: [{ name: "Accept", value: "application/json" }] } },
+    });
+    assert.equal(ok.isError, false, ok.text);
+    assert.equal(mock.seen.length, seenBefore + 1);
+    assert.equal(mock.seen[seenBefore].method, "PATCH");
+    noRwsSecrets(ok.text, "update_service rws response");
   });
 
   await t.test("get_access_audit: param passthrough, only_flagged, validation, 404/403", async () => {

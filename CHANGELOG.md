@@ -16,9 +16,19 @@ All notable changes to `df-system-mcp-server` are documented here.
   masks `value` on records with `private: true` (private lookups). Null,
   numbers and booleans pass through. `api_key` keeps its `api_key_hint`
   masking, and `create_app` still returns the new key.
+- Credentials stored as name/value entries are masked too. RWS services
+  returned `config.headers[].value` (e.g. `Authorization: Basic ...`) and
+  `config.parameters[].value` (e.g. `api_key=...`) in the clear, because the
+  secret sits next to a harmless-looking `name`. Every `value` in a `headers`
+  or `parameters` list is now masked, as is any `value` whose sibling `name`
+  looks like a credential (contains auth, token, secret, pass, key, cookie,
+  session, credential, bearer or signature). Properties named
+  `authorization`, `auth` or `cookie` are masked as well.
 - Write requests drop properties whose value is exactly `**********`, so
   sending back a config read through this server leaves the stored secret
-  unchanged.
+  unchanged. A `**********` inside a list is refused instead of sent:
+  DreamFactory replaces such lists as a whole (RWS headers and parameters are
+  deleted and recreated on save), so the mask would be stored as the value.
 
 ### Added
 - `MCP_EXPOSE_SECRETS=true` turns secret masking off.

@@ -185,11 +185,19 @@ protection mask, `"**********"`, at any depth:
   `app_key`, `encryption_key`, `credentials`, `connection_string` or `dsn`, and a property named
   exactly `key` (camelCase names count too, e.g. `clientSecret`)
 - except descriptive names such as `token_endpoint`, `token_ttl`, `password_policy` or `secret_type`
-- `value` on records with `private: true` (private lookups)
+- every `value` in a `headers` or `parameters` list (RWS services keep credentials there, e.g.
+  `{ "name": "Authorization", "value": "Basic ..." }` or an `api_key` query parameter), accepting
+  that harmless values such as `Accept` are masked too
+- `value` on any record whose `name` looks like a credential (contains `auth`, `token`, `secret`,
+  `pass`, `key`, `cookie`, `session`, `credential`, `bearer` or `signature`), and on records with
+  `private: true` (private lookups)
 - only non-empty strings, objects and arrays are replaced; `null`, numbers and booleans pass through
 
 Write requests drop any property whose value is exactly `"**********"`, so sending back a config read
-through this server leaves the stored secret unchanged. To rotate a credential, send the new value.
+through this server leaves the stored secret unchanged. A `"**********"` inside a list is refused with
+a tool error instead: DreamFactory replaces lists such as RWS `headers` and `parameters` as a whole, so
+the mask would be stored as the value. Send those lists with real values, or leave them out of the
+request to keep them. To rotate a credential, send the new value.
 Set `MCP_EXPOSE_SECRETS=true` to turn this masking off.
 
 **App API keys.** In every `list_apps`, `get_app` and `call_system_api` response,
