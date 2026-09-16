@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+      - name: Committed build/ matches src/
+        run: |
+          if [ -n "$(git status --porcelain -- build/)" ]; then
+            git status --porcelain -- build/
+            echo "::error::build/ is stale; run npm run build and commit it"
+            exit 1
+          fi
+      - run: npm test

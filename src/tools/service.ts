@@ -1,6 +1,44 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
+import type { AuthContext, DreamFactoryResult } from "../types";
+
+/** Service names DreamFactory accepts; anything else can't be a name and is never put into a filter. */
+const SERVICE_NAME = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * Resolve an `id_or_name` argument to a numeric service id. DreamFactory's
+ * system/service/{id} only takes ids (a name there is a 404), so a name is
+ * looked up with a `name='...'` filter first.
+ */
+export async function resolveServiceId(
+  idOrName: string,
+  auth: AuthContext | undefined,
+): Promise<{ id: string } | { failure: DreamFactoryResult }> {
+  const value = idOrName.trim();
+  if (/^\d+$/.test(value)) return { id: value };
+  if (!SERVICE_NAME.test(value)) {
+    return {
+      failure: {
+        ok: false,
+        status: 400,
+        error: `invalid service id or name '${idOrName}': use the numeric id or the service name (letters, digits, _ . -)`,
+      },
+    };
+  }
+  const found = await dreamFactoryFetch("GET", "system/service", {
+    auth,
+    query: { filter: `name='${value}'`, fields: "id,name" },
+  });
+  if (!found.ok) return { failure: found };
+  const rows = (found.data as { resource?: { id?: unknown }[] } | undefined)?.resource ?? [];
+  const id = rows[0]?.id;
+  if (typeof id !== "number" && typeof id !== "string") {
+    return { failure: { ok: false, status: 404, error: `no service named '${value}'` } };
+  }
+  return { id: String(id) };
+}
 
 /**
  * Register the service-CRUD tool family on the given MCP server.
@@ -8,8 +46,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * These tools cover /system/service — the table that holds every DreamFactory
  * connector (databases, file storage, email, scripts, etc).
  */
-export function registerServiceTools(server: McpServer): void {
-  server.tool(
+export function registerServiceTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "list_services",
     "List all DreamFactory services (database connectors, file storage, email, scripts, etc) registered on the platform. " +
       "Returns id, name, label, type, is_active, and description for each. " +
@@ -43,26 +83,33 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "get_service",
     "Retrieve a single DreamFactory service by numeric id OR by name. " +
-      "Returns full configuration including the `config` object (credentials, host, port, etc) " +
-      "for that service type. Use this when you need to inspect or copy an existing service's config.",
+      "Returns full configuration including the `config` object (host, port, database, etc) " +
+      "for that service type. Secret fields come back as \"**********\": passwords, client secrets, private keys, " +
+      "tokens, header or parameter values with credential names (Authorization, Cookie, api_key, ...), credential " +
+      "curl options, and passwords inside URLs. Other headers, parameters and options stay readable. Sending a " +
+      "masked top-level config field back in update_service leaves the stored secret unchanged; headers, parameters " +
+      "and options are stored as a whole, so send them with real values or leave them out. " +
+      "Use this when you need to inspect or copy an existing service's config.",
     {
       id_or_name: z.string().describe("Numeric id (e.g. \"7\") or service name (e.g. \"mysql-prod\")."),
     },
     async ({ id_or_name }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "GET",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("get_service", target.failure);
+      const result = await dreamFactoryFetch("GET", `system/service/${target.id}`, { auth });
       return toToolResponse("get_service", result);
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "create_service",
     "Create a new DreamFactory service (database connector, file storage, email, script, etc). " +
       "PREREQUISITE STEPS: " +
@@ -111,11 +158,17 @@ export function registerServiceTools(server: McpServer): void {
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "update_service",
     "Patch an existing DreamFactory service. Only the fields you provide in `patch` are modified; " +
       "everything else is left alone. Commonly used to flip `is_active`, change `label`, or update " +
-      "the `config` object (e.g. rotate credentials). Identify the service by numeric id or name.",
+      "the `config` object (e.g. rotate credentials). To rotate a credential, send the new value; any field set to " +
+      "\"**********\" directly in `config` is dropped before the request, so the stored secret stays as it is. A " +
+      "\"**********\" inside a list or nested value (RWS `headers`, `parameters`, `options`, which DreamFactory stores " +
+      "as a whole) or inside a longer string is refused: send the real values, or omit that field to keep it. " +
+      "Identify the service by numeric id or name.",
     {
       id_or_name: z.string().describe("Numeric id or service name."),
       patch: z
@@ -124,16 +177,16 @@ export function registerServiceTools(server: McpServer): void {
     },
     async ({ id_or_name, patch }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "PATCH",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth, body: patch },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("update_service", target.failure);
+      const result = await dreamFactoryFetch("PATCH", `system/service/${target.id}`, { auth, body: patch });
       return toToolResponse("update_service", result);
     },
   );
 
-  server.tool(
+  defineTool(
+    server,
+    opts,
     "delete_service",
     "Permanently delete a DreamFactory service. This unregisters the connector and removes the /api/v2/{name}/ " +
       "endpoint. Existing role_service_access entries referring to this service will be cascaded. " +
@@ -143,11 +196,9 @@ export function registerServiceTools(server: McpServer): void {
     },
     async ({ id_or_name }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
-      const result = await dreamFactoryFetch(
-        "DELETE",
-        `system/service/${encodeURIComponent(id_or_name)}`,
-        { auth },
-      );
+      const target = await resolveServiceId(id_or_name, auth);
+      if ("failure" in target) return toToolResponse("delete_service", target.failure);
+      const result = await dreamFactoryFetch("DELETE", `system/service/${target.id}`, { auth });
       return toToolResponse("delete_service", result);
     },
   );

@@ -1,10 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RegisterToolOptions } from "./define";
 import { registerServiceTools } from "./service";
 import { registerMetaTools } from "./meta";
 import { registerRoleTools } from "./role";
 import { registerAppTools } from "./app";
 import { registerAdminTools } from "./admin";
+import { registerAuditTools } from "./audit";
 import { registerGenericTools } from "./generic";
+
+export type { RegisterToolOptions } from "./define";
 
 /**
  * Canonical list of every tool this server registers. Kept here for the /health
@@ -32,18 +36,25 @@ export const TOOL_NAMES = [
   "get_app",
   // admins (1)
   "list_admins",
+  // access audit (1)
+  "get_access_audit",
   // escape hatch (1)
   "call_system_api",
 ] as const;
 
 export const TOOL_COUNT = TOOL_NAMES.length;
 
-/** Register every tool family on the MCP server. */
-export function registerTools(server: McpServer): void {
-  registerServiceTools(server);
-  registerMetaTools(server);
-  registerRoleTools(server);
-  registerAppTools(server);
-  registerAdminTools(server);
-  registerGenericTools(server);
+/**
+ * Register every tool family on the MCP server.
+ * `opts.disabled` (from the DreamFactory service's `disabled_tools` config)
+ * suppresses registration of the named tools; unknown names are ignored.
+ */
+export function registerTools(server: McpServer, opts?: RegisterToolOptions): void {
+  registerServiceTools(server, opts);
+  registerMetaTools(server, opts);
+  registerRoleTools(server, opts);
+  registerAppTools(server, opts);
+  registerAdminTools(server, opts);
+  registerAuditTools(server, opts);
+  registerGenericTools(server, opts);
 }

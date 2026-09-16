@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { defineTool, type RegisterToolOptions } from "./define";
 import { z } from "zod";
 import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfactory";
 
@@ -10,8 +11,10 @@ import { dreamFactoryFetch, getAuthForSession, toToolResponse } from "../dreamfa
  * tends to be a sensitive operation that should go through the orchestrator's
  * privileged path, not an LLM. Use call_system_api if you really need to write here.
  */
-export function registerAdminTools(server: McpServer): void {
-  server.tool(
+export function registerAdminTools(server: McpServer, opts?: RegisterToolOptions): void {
+  defineTool(
+    server,
+    opts,
     "list_admins",
     "List all DreamFactory admin users. Returns id, email, first_name, last_name, is_active, " +
       "is_root_admin, last_login_date. Read-only — to create a new admin, use call_system_api with " +
