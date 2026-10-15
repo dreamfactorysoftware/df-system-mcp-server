@@ -133,7 +133,7 @@ export function registerServiceTools(server: McpServer, opts?: RegisterToolOptio
         .describe(
           "Type-specific configuration object. Shape varies by type — fetch get_service_type_schema first.",
         ),
-      description: z.string().optional(),
+      description: z.string().optional().describe("Free-text purpose of the service, shown in the admin UI."),
       is_active: z.boolean().optional().default(true).describe("Whether the service is enabled."),
     },
     async ({ name, label, type, config, description, is_active }, extra) => {
