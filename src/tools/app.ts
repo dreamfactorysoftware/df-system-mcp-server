@@ -23,9 +23,9 @@ export function registerAppTools(server: McpServer, opts?: RegisterToolOptions):
       "`api_key_hint` holds \"…\" plus the key's last 4 characters, enough to tell keys apart or match one a " +
       "user quotes, never enough to use. Never ask for or try to reconstruct full keys.",
     {
-      filter: z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
-      fields: z.string().optional(),
-      limit: z.number().int().positive().optional(),
+      filter: z.string().optional().describe('SQL-like filter, e.g. "is_active=true" or "role_id=3".'),
+      fields: z.string().optional().describe('Comma-separated columns to return, e.g. "id,name,role_id,is_active".'),
+      limit: z.number().int().positive().optional().describe("Max apps to return (default 100); meta.count still reports the total."),
     },
     async ({ filter, fields, limit }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
@@ -74,7 +74,7 @@ export function registerAppTools(server: McpServer, opts?: RegisterToolOptions):
       "default and almost always correct.",
     {
       name: z.string().describe('Human-readable app name, e.g. "MobileApp" or "PartnerIntegration".'),
-      description: z.string().optional(),
+      description: z.string().optional().describe("Free-text purpose of the app, shown in the admin UI."),
       role_id: z
         .number()
         .int()
@@ -87,7 +87,7 @@ export function registerAppTools(server: McpServer, opts?: RegisterToolOptions):
         .describe(
           "App type: 0 = None (headless API client, the usual case), 1 = web, 2 = path, 3 = url, 4 = remote.",
         ),
-      is_active: z.boolean().optional().default(true),
+      is_active: z.boolean().optional().default(true).describe("false creates the app disabled: its API key is rejected until an admin enables it."),
     },
     async ({ name, description, role_id, type, is_active }, extra) => {
       const auth = getAuthForSession(extra.sessionId);

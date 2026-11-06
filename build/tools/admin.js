@@ -16,9 +16,9 @@ function registerAdminTools(server, opts) {
     (0, define_1.defineTool)(server, opts, "list_admins", "List all DreamFactory admin users. Returns id, email, first_name, last_name, is_active, " +
         "is_root_admin, last_login_date. Read-only — to create a new admin, use call_system_api with " +
         "method=POST and path=system/admin (and supply a generated password).", {
-        filter: zod_1.z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
-        fields: zod_1.z.string().optional(),
-        limit: zod_1.z.number().int().positive().optional(),
+        filter: zod_1.z.string().optional().describe('SQL-like filter, e.g. "is_active=true" or "email LIKE %@example.com".'),
+        fields: zod_1.z.string().optional().describe('Comma-separated columns to return, e.g. "id,email,is_active,last_login_date".'),
+        limit: zod_1.z.number().int().positive().optional().describe("Max admins to return (default 100); meta.count still reports the total."),
     }, async ({ filter, fields, limit }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
         // include_count + default limit=100 so the LLM gets `meta.count`.

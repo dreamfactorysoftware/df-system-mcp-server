@@ -19,9 +19,9 @@ function registerAppTools(server, opts) {
         "Returns id, name, description, role_id, type, is_active. API keys are MASKED: `api_key` is null and " +
         "`api_key_hint` holds \"…\" plus the key's last 4 characters, enough to tell keys apart or match one a " +
         "user quotes, never enough to use. Never ask for or try to reconstruct full keys.", {
-        filter: zod_1.z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
-        fields: zod_1.z.string().optional(),
-        limit: zod_1.z.number().int().positive().optional(),
+        filter: zod_1.z.string().optional().describe('SQL-like filter, e.g. "is_active=true" or "role_id=3".'),
+        fields: zod_1.z.string().optional().describe('Comma-separated columns to return, e.g. "id,name,role_id,is_active".'),
+        limit: zod_1.z.number().int().positive().optional().describe("Max apps to return (default 100); meta.count still reports the total."),
     }, async ({ filter, fields, limit }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
         // include_count + default limit=100 so the LLM gets `meta.count` and a
@@ -54,7 +54,7 @@ function registerAppTools(server, opts) {
         "what that API key may call. Set `type` to 0 (None / no app launch) for headless API consumers — that is the " +
         "default and almost always correct.", {
         name: zod_1.z.string().describe('Human-readable app name, e.g. "MobileApp" or "PartnerIntegration".'),
-        description: zod_1.z.string().optional(),
+        description: zod_1.z.string().optional().describe("Free-text purpose of the app, shown in the admin UI."),
         role_id: zod_1.z
             .number()
             .int()
@@ -65,7 +65,7 @@ function registerAppTools(server, opts) {
             .optional()
             .default(0)
             .describe("App type: 0 = None (headless API client, the usual case), 1 = web, 2 = path, 3 = url, 4 = remote."),
-        is_active: zod_1.z.boolean().optional().default(true),
+        is_active: zod_1.z.boolean().optional().default(true).describe("false creates the app disabled: its API key is rejected until an admin enables it."),
     }, async ({ name, description, role_id, type, is_active }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
         const result = await (0, dreamfactory_1.dreamFactoryFetch)("POST", "system/app", {
