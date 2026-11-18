@@ -2,6 +2,17 @@
 
 All notable changes to `df-system-mcp-server` are documented here.
 
+## 0.5.2 — 2026-11-18
+
+### Added
+- MCP tool annotations on every tool: read-only, destructive, idempotent and open-world hints.
+- Descriptions for every remaining tool parameter.
+
+## 0.5.1 — 2026-09-24
+
+### Changed
+- License metadata: Apache-2.0.
+
 ## 0.5.0 — 2026-09-14
 
 ### Added

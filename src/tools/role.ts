@@ -46,7 +46,7 @@ export function registerRoleTools(server: McpServer, opts?: RegisterToolOptions)
     {
       filter: z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
       fields: z.string().optional().describe("Comma-separated columns to return."),
-      limit: z.number().int().positive().optional(),
+      limit: z.number().int().positive().optional().describe("Max roles to return (default 100); meta.count still reports the total."),
     },
     async ({ filter, fields, limit }, extra) => {
       const auth = getAuthForSession(extra.sessionId);
@@ -97,8 +97,8 @@ export function registerRoleTools(server: McpServer, opts?: RegisterToolOptions)
       "Each access entry needs service_id, component, and verb_mask (bitmask: GET=1, POST=2, PUT=4, PATCH=8, DELETE=16).",
     {
       name: z.string().describe('Human-readable role name, e.g. "ReadOnlyReports".'),
-      description: z.string().optional(),
-      is_active: z.boolean().optional().default(true),
+      description: z.string().optional().describe("Free-text purpose of the role, shown in the admin UI."),
+      is_active: z.boolean().optional().default(true).describe("false creates the role disabled so no app or user can use it until an admin enables it."),
       role_service_access_by_role_id: z
         .array(accessEntry)
         .optional()

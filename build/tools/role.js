@@ -37,7 +37,7 @@ function registerRoleTools(server, opts) {
         "Returns id, name, description, is_active for each. Use `filter` to narrow (e.g. \"is_active=true\").", {
         filter: zod_1.z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
         fields: zod_1.z.string().optional().describe("Comma-separated columns to return."),
-        limit: zod_1.z.number().int().positive().optional(),
+        limit: zod_1.z.number().int().positive().optional().describe("Max roles to return (default 100); meta.count still reports the total."),
     }, async ({ filter, fields, limit }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);
         // Always request include_count so the LLM gets `meta.count` — answers
@@ -72,8 +72,8 @@ function registerRoleTools(server, opts) {
         "as an array of access entries; the platform will insert them in a single transaction. " +
         "Each access entry needs service_id, component, and verb_mask (bitmask: GET=1, POST=2, PUT=4, PATCH=8, DELETE=16).", {
         name: zod_1.z.string().describe('Human-readable role name, e.g. "ReadOnlyReports".'),
-        description: zod_1.z.string().optional(),
-        is_active: zod_1.z.boolean().optional().default(true),
+        description: zod_1.z.string().optional().describe("Free-text purpose of the role, shown in the admin UI."),
+        is_active: zod_1.z.boolean().optional().default(true).describe("false creates the role disabled so no app or user can use it until an admin enables it."),
         role_service_access_by_role_id: zod_1.z
             .array(accessEntry)
             .optional()

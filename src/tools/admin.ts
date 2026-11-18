@@ -20,9 +20,9 @@ export function registerAdminTools(server: McpServer, opts?: RegisterToolOptions
       "is_root_admin, last_login_date. Read-only — to create a new admin, use call_system_api with " +
       "method=POST and path=system/admin (and supply a generated password).",
     {
-      filter: z.string().optional().describe('SQL-like filter, e.g. "is_active=true".'),
-      fields: z.string().optional(),
-      limit: z.number().int().positive().optional(),
+      filter: z.string().optional().describe('SQL-like filter, e.g. "is_active=true" or "email LIKE %@example.com".'),
+      fields: z.string().optional().describe('Comma-separated columns to return, e.g. "id,email,is_active,last_login_date".'),
+      limit: z.number().int().positive().optional().describe("Max admins to return (default 100); meta.count still reports the total."),
     },
     async ({ filter, fields, limit }, extra) => {
       const auth = getAuthForSession(extra.sessionId);

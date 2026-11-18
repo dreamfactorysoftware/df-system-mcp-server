@@ -107,7 +107,7 @@ function registerServiceTools(server, opts) {
             .record(zod_1.z.unknown())
             .optional()
             .describe("Type-specific configuration object. Shape varies by type — fetch get_service_type_schema first."),
-        description: zod_1.z.string().optional(),
+        description: zod_1.z.string().optional().describe("Free-text purpose of the service, shown in the admin UI."),
         is_active: zod_1.z.boolean().optional().default(true).describe("Whether the service is enabled."),
     }, async ({ name, label, type, config, description, is_active }, extra) => {
         const auth = (0, dreamfactory_1.getAuthForSession)(extra.sessionId);

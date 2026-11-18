@@ -153,6 +153,12 @@ test("MCP server exposes all 18 control-plane tools", async (t) => {
         tool.description && tool.description.length > 40,
         `tool ${tool.name} has too short a description for small-LLM routing`,
       );
+      // Every tool declares MCP annotations so clients can gate confirmations
+      // without parsing prose.
+      assert.ok(
+        tool.annotations && typeof tool.annotations.readOnlyHint === "boolean",
+        `tool ${tool.name} is missing annotations`,
+      );
     }
   } finally {
     await client.close();
